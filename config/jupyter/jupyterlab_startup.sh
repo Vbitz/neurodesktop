@@ -22,6 +22,8 @@ trap cleanup_startup_lock EXIT
 
 # Restore default home directory files (per-file, not bulk copy)
 # Each file is copied if missing, or migrated when image defaults are newer.
+# Image-installed or user-selected dependency is unavailable in the checkout.
+# shellcheck source=/dev/null
 source /opt/neurodesktop/restore_home_defaults.sh
 
 # Initialize per-user Guacamole config and random credentials BEFORE Jupyter
@@ -29,8 +31,10 @@ source /opt/neurodesktop/restore_home_defaults.sh
 # /neurodesktop proxy is derived from ${HOME}/.neurodesk/secrets files written
 # by this script. Skipping this step would cause Jupyter to send stale
 # jovyan/password credentials and result in a 401 from the rotated Guacamole.
-if [ -x /opt/neurodesktop/init_secrets.sh ]; then
+if [ "${NEURODESKTOP_RUNTIME:-container}" != glass ] && [ -x /opt/neurodesktop/init_secrets.sh ]; then
     # shellcheck disable=SC1091
+    # Image-installed or user-selected dependency is unavailable in the checkout.
+    # shellcheck source=/dev/null
     source /opt/neurodesktop/init_secrets.sh || \
         echo "[WARN] init_secrets.sh failed; Guacamole web auth may fall back to the static default."
 fi
@@ -157,7 +161,7 @@ fi
 # Create a symlink in home if /data is mounted
 if mountpoint -q /data; then
     if [ ! -L "${HOME}/data" ]; then
-        ln -s /data ${HOME}/
+        ln -s /data "${HOME}/"
     fi
 fi
 
@@ -200,10 +204,10 @@ fi
 mkdir -p /tmp/apptainer_overlay
 
 # ensure goose config directory exists
-mkdir -p ${HOME}/.config/goose
+mkdir -p "${HOME}/.config/goose"
 
 # ensure opencode config directory exists
-mkdir -p ${HOME}/.config/opencode
+mkdir -p "${HOME}/.config/opencode"
 
 # Align Notebook Intelligence's provider/model with the model selected in
 # OpenCode (~/.config/opencode/opencode.json) and inject NEURODESK_API_KEY
@@ -278,6 +282,7 @@ ensure_codeserver_extensions &
 # Conda shell hooks are already provided by the base image/defaults.
 # Avoid mutating shell config on each startup.
 
+if [ "${NEURODESKTOP_RUNTIME:-container}" != glass ]; then
 # Setup VNC directory and ensure files exist (should be restored from defaults)
 echo "[INFO] Setting up VNC..."
 mkdir -p "${HOME}/.vnc"
@@ -296,6 +301,8 @@ fi
 # Create xstartup if not existing (fallback if restore failed)
 if [ ! -f "${HOME}/.vnc/xstartup" ]; then
     echo "[INFO] Creating VNC xstartup (not found in restored defaults)..."
+    # Keep command substitution literal for the generated xstartup script.
+    # shellcheck disable=SC2016
     printf '%s\n' '#!/bin/sh' 'eval "$(dbus-launch --sh-syntax)"' 'export DBUS_SESSION_BUS_ADDRESS' '/usr/bin/startlxde' 'vncconfig -nowin -noiconic &' > "${HOME}/.vnc/xstartup"
 fi
 
@@ -305,5 +312,7 @@ chmod +x "${HOME}/.vnc/xstartup"
 
 # echo "[INFO] VNC setup complete. Contents of ${HOME}/.vnc:"
 # ls -la "${HOME}/.vnc/"
+
+fi
 
 touch "$STARTUP_DONE_FILE"

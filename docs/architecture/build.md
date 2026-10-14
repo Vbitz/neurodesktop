@@ -5,7 +5,7 @@ description: Image build steps with non-obvious behavior — the Notebook
   stage, and user permissions
 parent: ../architecture.md
 status: current
-last-reviewed: "2026-09-21"
+last-reviewed: "2026-10-08"
 ---
 
 # Build-Time Behaviors
@@ -22,6 +22,20 @@ The [image release workflows](../testing.md#image-release-validation) build
 candidates for a specific run and attempt, test and scan them, and then promote
 the same candidates to release tags. Native runtime checks cover both image
 architectures. A date tag never substitutes for building the run's source SHA.
+
+## Bundled code-server dependencies
+
+The builder replaces VS Code's nested `shell-quote` package at
+`/opt/code-server/lib/vscode/node_modules/shell-quote` with the
+`SHELL_QUOTE_VERSION` release. The package has no runtime dependencies.
+It also installs `PROXY_ADDR_VERSION` into code-server's npm dependency tree,
+updating the manifest and shrinkwrap together. Both installed versions are
+checked before code-server is copied into the runtime image.
+
+The [version audit](../../scripts/audit_image_versions.py) reads both pins
+from the Dockerfile and checks releases against npm. The
+[installed-package tests](../testing.md#bundled-code-server-security-regressions)
+exercise quoting and proxy trust behavior at the shipped paths.
 
 ## Layer Ordering and Cache
 
@@ -81,7 +95,7 @@ declared builder range against the image's builder pin before producing the
 wheel; the previous package-rename workaround is no longer needed.
 
 Both Jupyter source builds use [build constraints](../../config/jupyter/build-constraints.txt)
-for the isolated Python build environment. The toolchain pins Hatchling 1.32.3
+for the isolated Python build environment. The toolchain pins Hatchling 1.32.4
 and hatch-jupyter-builder 0.10.0. The launcher also declares that pair in its
 own build metadata. Use pip's `--build-constraint`, not `-c`: ordinary runtime
 constraints do not constrain isolated build dependencies. Changes to these
@@ -215,6 +229,13 @@ cannot run on 'arm64'" bug on macOS. Other non-Apptainer sessions leave
 `neurodesk_singularity_opts` empty because it interferes with VS Code and
 Matlab. Non-root Apptainer/HPC sessions use `--writable-tmpfs` because setuid
 Apptainer cannot use a directory overlay as an unprivileged user.
+
+Root startup adds missing CPU MHz information for Matlab by binding a prepared
+file onto `/proc/cpuinfo`. The successful bind source stays in the root-private
+`/run/neurodesktop/cpuinfo` directory for the mount's lifetime. Unlinking that
+source prevents nested Apptainer sessions from binding their own CPU information
+onto `/proc/cpuinfo`. Failed preparation removes its temporary file; repeated
+startup leaves an existing CPU MHz entry intact.
 
 When `/proc/driver/nvidia/version` shows that the proprietary NVIDIA driver is
 loaded, `environment_variables.sh` defaults `APPTAINER_NV` to `1`. Apptainer

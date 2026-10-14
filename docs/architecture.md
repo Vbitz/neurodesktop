@@ -4,7 +4,7 @@ description: Startup flow, services, directory layout, and the map of
   per-subsystem architecture pages
 parent: index.md
 status: current
-last-reviewed: "2026-09-20"
+last-reviewed: "2026-10-14"
 ---
 
 # Architecture
@@ -20,6 +20,7 @@ under [`docs/architecture/`](architecture/). The wiki entry point is
 | --- | --- |
 | [CVMFS and Neurocommand](architecture/cvmfs.md) | CVMFS server selection, mount configuration, and the neuroimaging tool/module system |
 | [Desktop environment](architecture/desktop.md) | LXDE over VNC/RDP through Guacamole, clipboard sync, Firefox profiles, office file associations |
+| [Glass runtime](architecture/glass.md) | Experimental CC native desktop, initialization, security and acceptance |
 | [Kasm image](architecture/kasm.md) | Separate Kasm Workspaces image, build and run commands, desktop startup, and home persistence |
 | [Webapp system](architecture/webapps.md) | Container-backed and hosted webapp tiles, and the build-time Jupyter config generation |
 | [Workspace link routing](architecture/workspace-link-routing.md) | Opening agent-authored absolute file links inside JupyterLab |
@@ -38,15 +39,27 @@ The startup sequence follows this order (per
 1. [`config/jupyter/start_notebook.sh`](../config/jupyter/start_notebook.sh)
    sets ownership permissions for the home directory.
 2. [`config/jupyter/before_notebook.sh`](../config/jupyter/before_notebook.sh)
-   configures the environment and launches the deferred worker for lazy
+   configures the environment, sources
+   [`detect_resource_limits.sh`](../config/jupyter/detect_resource_limits.sh)
+   and calls `detect_resource_limits` to export `MEM_LIMIT` and `CPU_LIMIT`
+   from cgroup v2/v1 files, or from the Slurm allocation inside a Slurm job,
+   for the Jupyter resource indicator. It also sources
+   [`guard_ollama_host.sh`](../config/jupyter/guard_ollama_host.sh) to bound the
+   Ollama availability check. Both helpers are installed under
+   `/opt/neurodesktop/` and sourced rather than executed: docker-stacks sources
+   the hook into the shell that starts Jupyter, so their exports reach the
+   server. The hook then launches the deferred worker for lazy
    CVMFS and Slurm startup, the default. Eager mode runs each selected service
    synchronously. The worker reads the live Jupyter server's runtime file and
    probes its local HTTP endpoint, including its configured port and base path.
    It starts CVMFS and Slurm independently after readiness, or after a
-   120-second timeout. CVMFS ranks servers by measured download throughput via
+   120-second timeout. CVMFS ranks servers by measured request latency and download speed via
    [`config/jupyter/cvmfs_server_select.sh`](../config/jupyter/cvmfs_server_select.sh).
    The worker waits for both components before writing its completion marker;
    that marker records completion of the attempts, not service health.
+   After the CVMFS attempt it also launches the background
+   [module cache warm-up](architecture/cvmfs.md#module-cache-warm-up), which
+   does not delay the marker.
    The hook also launches
    [`config/jupyter/print_access_url.sh`](../config/jupyter/print_access_url.sh)
    in the background, which waits until the Jupyter server answers HTTP and
@@ -112,6 +125,9 @@ itself.
   external cluster launchers such as `connectSherlock.sh`
 - [`extensions/`](../extensions/): in-repo JupyterLab extensions
   (`neurodesk-launcher`, `astra-viewer`)
+- [`tools/javascript-lint/`](../tools/javascript-lint/): the locked ESLint
+  toolchain and runtime map for owned JavaScript; see
+  [code quality checks](testing.md#code-quality-checks)
 - [`tests/`](../tests/): the two-tier test suite (see [Testing](testing.md));
   [`tests/fixtures/astra-bet/`](../tests/fixtures/astra-bet/) is the canonical
   worked ASTRA spec installed into the image as an example
