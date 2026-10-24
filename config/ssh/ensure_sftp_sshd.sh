@@ -1,5 +1,14 @@
 #!/bin/bash
 
+# Publish a port only after sshd binds it; stale ports can break VNC connections.
+NEURODESKTOP_RUNTIME_DIR="${NEURODESKTOP_RUNTIME_DIR:-${HOME}/.neurodesk/runtime}"
+mkdir -p "${NEURODESKTOP_RUNTIME_DIR}" 2>/dev/null || true
+rm -f "${NEURODESKTOP_RUNTIME_DIR}/sftp_port" 2>/dev/null || true
+if [ "${NEURODESKTOP_DISABLE_SSH:-false}" = "true" ]; then
+    echo "[INFO] NEURODESKTOP_DISABLE_SSH=true: skipping SSH/SFTP service."
+    exit 0
+fi
+
 SSH_DIR="${HOME}/.ssh"
 SSH_CONFIG="${SSH_DIR}/sshd_config"
 DEFAULT_SSH_CONFIG="/opt/jovyan_defaults/.ssh/sshd_config"
@@ -43,16 +52,8 @@ if [ -z "${SFTP_SSH_PORT:-}" ]; then
 fi
 export NEURODESKTOP_SFTP_PORT="${SFTP_SSH_PORT}"
 
-# Runtime dir where we will publish the chosen port IFF sshd actually binds it.
-# Do NOT publish eagerly: if the start fails later, guacamole.sh would otherwise
-# stamp a dead port into user-mapping.xml and Guacamole would abort the VNC
-# tunnel with CLIENT_UNAUTHORIZED (0x0301) at connect time when it tries to
-# initialise the SFTP side-channel.
-NEURODESKTOP_RUNTIME_DIR="${NEURODESKTOP_RUNTIME_DIR:-${HOME}/.neurodesk/runtime}"
-mkdir -p "${NEURODESKTOP_RUNTIME_DIR}" 2>/dev/null || true
-rm -f "${NEURODESKTOP_RUNTIME_DIR}/sftp_port" 2>/dev/null || true
-
-SFTP_SSH_PID_FILE="/tmp/sshd_${SFTP_SSH_PORT}_${UID:-$(id -u)}.pid"
+# Keep daemon state in the user's private SSH directory on shared HPC hosts.
+SFTP_SSH_PID_FILE="${SSH_DIR}/sshd_${SFTP_SSH_PORT}.pid"
 
 warn() {
     echo "[WARN] $1"
@@ -192,14 +193,9 @@ start_sshd() {
         return 0
     fi
 
-    if [ -f "${SFTP_SSH_PID_FILE}" ]; then
-        local existing_pid
-        existing_pid="$(cat "${SFTP_SSH_PID_FILE}" 2>/dev/null || true)"
-        if [ -n "${existing_pid}" ] && kill -0 "${existing_pid}" 2>/dev/null; then
-            return 0
-        fi
-        rm -f "${SFTP_SSH_PID_FILE}"
-    fi
+    # A persisted PID can belong to another host or a previous container.
+    # The listener check above and sshd's bind determine local availability.
+    rm -f "${SFTP_SSH_PID_FILE}"
 
     if sudo -n true 2>/dev/null; then
         sshd_prefix=(sudo)
