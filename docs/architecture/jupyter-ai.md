@@ -45,7 +45,7 @@ configuration. The optional Jupyter AI magic and Jupyternaut extras are not
 installed because their LiteLLM/prerelease constraints conflict with the
 validated Neurodesktop stack.
 
-Notebook Intelligence 6.2.0 imports the MCP Python SDK's v1
+Notebook Intelligence 6.3.0 imports the MCP Python SDK's v1
 ``mcp.server.fastmcp`` module and declares ``mcp<2``. Neurodesktop retains
 ``mcp>=1.30.0,<2`` until Notebook Intelligence migrates to MCP 2. The
 container test imports the v1 API and Notebook Intelligence itself; the exit
@@ -160,8 +160,13 @@ message prove the bridge, before the channel listen tasks start. The transient
 sockets keep nudge replies away from the frontend, and the proving IOPub
 message is forwarded to the WebSocket rather than consumed. A busy kernel is
 skipped (its subscriptions are long established, and shell requests would
-queue behind the running execution), and the nudge is bounded at ten seconds,
-after which the connection proceeds with the old behavior. The logic lives in
+queue behind the running execution), and the nudge uses the connection's
+`kernel_info_timeout`. The image sets
+`MappingKernelManager.kernel_info_timeout` to 180 seconds to allow cold CVMFS
+container startup. An explicit server configuration override applies to both
+upstream connections and this bridge. After that timeout, the connection
+proceeds with the old behavior. The probe exits early if the kernel is removed
+or restarts on different ports. The logic lives in
 `config/jupyter/neurodesktop_kernel_nudge.py`, installed into the package as
 `jupyter_server_documents/_neurodesktop_kernel_nudge.py`; the frontend probe,
 reconnect, and retry bounds above remain as defense in depth.
@@ -252,8 +257,10 @@ are a port of JupyterLab's `Private.processText`/`addText`
 the package as `outputs/_neurodesktop_stream.py` and splices only thin
 delegating methods, so the algorithm stays reviewable and is pinned by parity
 vectors in `tests/unit/test_neurodesktop_stream_output.py`. Between messages
-the processor retains only a per-cell `(length, cursor, running hash)` —
-never the accumulated text — and appends blindly while the cursor sits at
+the processor retains only a per-cell `StreamState` named tuple
+`(text_length, cursor, running_hash)` — never the accumulated text — and
+each state owns its incremental hash snapshot rather than mutating a retained
+earlier state. The processor appends blindly while the cursor sits at
 the end and the fragment contains no `\r` or `\b`, so ordinary
 newline-terminated output of any size is neither held in memory for the life
 of the room nor rebuilt on every fragment. Rewinding fragments materialize
@@ -373,14 +380,17 @@ tests and drop only marker-presence assertions; update the AGENTS.md bullet
 and this page. When a patcher has no seams left, delete the script, its
 Dockerfile `RUN` layer, and its unit-test file.
 
-`jupyter-ai-acp-client` 0.3.3 logs every streamed message chunk at INFO — two
+`jupyter-ai-acp-client` 0.3.4 logs every streamed message chunk at INFO — two
 lines per chunk, where a chunk is often a few characters — plus one line per
 tool-call start and per once-a-second progress tick, so a single persona reply
 floods the Jupyter server log with thousands of lines. A second anchored
 build-time patch (`patch_jupyter_ai_acp_client.py`) demotes those four
 per-event log statements to DEBUG; rarer events such as permission requests
-stay at INFO. Like the issue-271 patch, it fails the image build if a future
-release changes any source seam.
+stay at INFO. The same patcher widens the OpenCode persona's version guard,
+which rejects every release from 2.0 on, to admit the OpenCode 2 line: OpenCode
+2 still speaks ACP through `opencode acp`, and the image test runs an ACP
+session through it. Like the issue-271 patch, it fails the image build if a
+future release changes any source seam.
 
 `jupyter-server-mcp` 0.3.0 starts FastMCP through its own embedded HTTP
 runner and prints the FastMCP ASCII banner unconditionally, ignoring

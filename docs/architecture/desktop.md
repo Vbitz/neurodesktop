@@ -1,10 +1,11 @@
 ---
 title: Desktop environment
-description: LXDE desktop over VNC/RDP through Guacamole, clipboard sync,
-  per-display Firefox profiles, and office file associations
+description: LXDE desktop over VNC/RDP through Guacamole, voxl desktop
+  streaming with a patched Xvfb, clipboard sync, per-display Firefox
+  profiles, and office file associations
 parent: ../architecture.md
 status: current
-last-reviewed: "2026-10-23"
+last-reviewed: "2026-11-10"
 ---
 
 # Desktop Environment
@@ -100,6 +101,13 @@ startup worker. Guacamole web and VNC credentials remain separate per-user
 secrets. See [startup privileges](../environment-variables.md#startup-privileges)
 for the package-only sudo policy.
 
+Guacamole's Tomcat HTTP connector also listens only on `127.0.0.1`. Each
+launcher configures its per-user port and loopback address together, disables
+Tomcat's shutdown TCP port, and stops before launch if the copied `server.xml`
+does not contain exactly one active HTTP/1.1 connector. Browser access therefore
+continues through Jupyter's authenticated proxy without exposing the Guacamole
+login surface to container peers or users sharing an HPC network namespace.
+
 The packaged xrdp daemon runs as `xrdp`. The image sets sesman's
 `SessionSockdirGroup=xrdp` so that daemon can reach the notebook user's Xorg
 and channel-server sockets. Their parent directory excludes other users, and
@@ -107,15 +115,33 @@ the sockets remain mode `0660`. Leaving the group at `root` prevents xrdp from
 forwarding the desktop even after authentication succeeds.
 
 The SSH daemon used only for Guacamole's VNC SFTP side-channel listens on
-`127.0.0.1`. Startup checks every effective listener address, including addresses
-from included files. A saved configuration that allows another address uses a
-minimal loopback-only fallback without replacing the saved file. This prevents
-persisted configurations from exposing the service on a container or shared
-HPC network interface. Its PID file also stays in the user's mode-0700 SSH
-directory, so another UID on a shared host cannot replace the daemon's state
-path between startup checks and the daemon opening it. Startup checks the local
-listener rather than trusting a saved PID, which can be reused after a container
-restart or belong to another host sharing the home directory.
+`127.0.0.1`. Startup checks every effective listener address, including
+addresses from included files. A saved configuration that allows another
+address uses a minimal loopback-only fallback without replacing the saved
+file. This prevents persisted configurations from exposing the service on a
+container or shared HPC network interface. On shared-network runtimes, an
+automatically selected port is retried when another session claims it between
+the availability probe and sshd's bind; a caller-specified port remains
+strict. Its PID file and per-port mode-0600 daemon log stay in the user's
+mode-0700 SSH directory, so another UID on a shared host cannot replace the
+daemon's state path between startup checks and the daemon opening it. The log
+persists because OpenSSH reopens it on each connection; it is truncated on the
+next launch for that port. When sshd starts through sudo, readiness reads its root-owned mode-0600
+PID file through sudo too. Startup checks that the live daemon PID owns the
+local listener rather than trusting a saved PID, which can be reused after a
+container restart or belong to another host sharing the home directory. It
+uses the process annotation reported by `ss` when available, and otherwise
+matches the listener's kernel socket inode to the daemon's file descriptors;
+an unrelated process on the selected port is never accepted. After launching
+sshd, startup polls for that owned listener for up to five seconds before
+publishing the SFTP port: the daemon parent can exit before its child binds. If
+the listener never appears, startup reports the SSH diagnostic and leaves SFTP
+disabled. Startup
+also forces every authenticated session through OpenSSH's in-process SFTP
+server and disables TCP, Unix-socket, agent, and X11 forwarding plus TTY
+allocation. These command-line restrictions apply even when an older home
+directory restores a configuration that previously allowed an interactive
+shell or forwarding.
 
 Set `NEURODESKTOP_DISABLE_SSH=true` before startup to disable that daemon and
 the separate `jupyter-sshd-proxy` endpoint. Guacamole startup removes stale SFTP
@@ -155,6 +181,81 @@ parent-death signal, so the proxy's SIGKILL cannot leave code-server running.
 Each launch uses its own staging name and removes the published socket only if
 it is still the one that launch placed. An orphan from a launch that missed the
 proxy's timeout cannot remove the next launch's socket while it shuts down.
+
+## voxl desktop streaming
+
+The `Neurodesktop voxl` launcher streams an LXDE desktop with
+[voxl](https://github.com/tembo/voxl). voxl encodes the X display as H.264
+with x264 and sends video, input, and clipboard over one WebSocket. The browser
+decodes the stream with WebCodecs. The Guacamole VNC and RDP launchers are
+unchanged.
+
+[`config/voxl/voxl.sh`](../../config/voxl/voxl.sh) starts its own Xvfb on the
+first free display from `:60` to `:99`. Guacamole probes and kills displays
+`:1` to `:42`, so the two do not collide. This desktop is separate from the
+Guacamole desktops. Xvfb opens no TCP listener and admits X clients with a
+fresh cookie in `~/.Xauthority`. The launcher treats the display as ready only
+after Xvfb reports its number through `-displayfd`, so another server already
+answering on that display cannot pass for the new one.
+
+Xvfb runs with `-shmem`, so voxl reads the framebuffer in place instead of
+copying each frame through the X server. Xvfb creates that SysV segment with
+mode `0777`. Apptainer shares the host's IPC namespace, so on a shared HPC node
+any user could otherwise read or write the desktop.
+`neurodesktop-shm-private`, built from
+[`config/voxl/neurodesktop-shm-private.c`](../../config/voxl/neurodesktop-shm-private.c),
+sets the segments that Xvfb created to mode `0600`. It then requires Xvfb to
+be the only attachment. A process that attached before the mode change keeps
+its mapping, so the launcher stops and streams nothing if any other process is
+attached.
+
+The desktop follows the viewer's window. On connect and after each window
+resize, voxl's client asks for the window's CSS size times a scale, and voxl
+resizes the X screen with RandR. The launcher passes `--resize-scale 1`. voxl's
+own default of 1.5 assumes a session drawn at 144 DPI, and the LXDE session
+draws at 96 DPI, so 1 shows applications at the browser's size. Adding
+`?scale=2` to the launcher's page URL gives a sharp desktop on a HiDPI display
+for that viewer. RandR cannot grow an Xvfb screen past its starting size, so
+Xvfb starts at the largest allowed size, 3840x2160 by default, and voxl clamps
+each request to it. Administrators set both values with
+[`NEURODESKTOP_VOXL_RESIZE_SCALE` and `NEURODESKTOP_VOXL_SCREEN_SIZE`](../environment-variables.md#desktop-vncrdp-guacamole-firefox).
+
+The launcher runs `/usr/local/libexec/voxl/Xvfb`, not the distro's
+`/usr/bin/Xvfb`. The `voxl-builder` stage rebuilds Ubuntu's `xorg-server`
+source, at the version of the `xvfb` package that the runtime installs, with
+Debian's configure flags. It adds voxl's
+[XTEST scroll-axis patch](../../config/voxl/xorg-server-xtest-scroll.patch),
+which gives the XTEST pointer vertical and horizontal scroll axes. voxl then
+sends trackpad and high-resolution wheel input as pixel-precise scrolling
+instead of whole wheel steps. The runtime `xvfb` package still supplies the
+server's libraries and XKB tools, and Glass and `xvfb-run` keep the unpatched
+server. A distro security update to `xorg-server` reaches this Xvfb only when
+the image is rebuilt.
+
+voxl listens on `127.0.0.1` at the port Jupyter Server Proxy assigns. Each
+Jupyter configuration load creates a random token. The proxy passes it to the
+launcher as `VOXL_PASSWORD` and adds `Authorization: Bearer <token>` to every
+proxied request, including the WebSocket upgrade. Other users on a shared host
+can reach the loopback port, but voxl answers them with HTTP 401. The token
+never appears on a command line or in the logs. voxl's own login stays
+enabled. `--allowed-hosts '*'` accepts the browser's Jupyter host name,
+because the token, not the host name, admits a request. The launcher turns off
+desktop audio and voxl's file transfer panel. When Jupyter Server Proxy stops
+the launcher, the launcher stops voxl, waits for the desktop session to stop,
+then stops Xvfb and removes the display's cookie. A five-second watchdog
+forcibly stops a custom session script that ignores termination.
+
+The launcher is hidden in Glass and when `/usr/local/bin/voxl` is missing.
+Limits:
+
+- WebCodecs requires HTTPS or `localhost`. A plain-HTTP remote address shows
+  no video; use a Guacamole launcher there.
+- Encoding is CPU-only. The image has no PulseAudio, so there is no desktop
+  audio or microphone.
+- The stage builds `voxl-server` from crates.io with Ubuntu's Rust toolchain.
+  The version is set by
+  [`VOXL_VERSION`](../environment-variables.md#build-arguments). The x264 it
+  links makes the binary GPL-2.0.
 
 ## Clipboard sync
 

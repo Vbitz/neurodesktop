@@ -18,8 +18,12 @@ under [`docs/architecture/`](architecture/). The wiki entry point is
 
 | Page | Covers |
 | --- | --- |
-| [CVMFS and Neurocommand](architecture/cvmfs.md) | CVMFS server selection, mount configuration, and the neuroimaging tool/module system |
-| [Desktop environment](architecture/desktop.md) | LXDE over VNC/RDP through Guacamole, clipboard sync, Firefox profiles, office file associations |
+| [CVMFS and Neurocommand](architecture/cvmfs.md) | CVMFS server selection, mount configuration, the neuroimaging tool/module system, and container kernels |
+| [Neurodesk command](architecture/neurodesk-cli.md) | The `neurodesk` dispatcher for the helper commands, and its `check`, `test` and `info` commands |
+| [Tool citations](architecture/citations.md) | Lmod usage recording and the `neurodesk cite` command that writes `CITATIONS.md` |
+| [uv Python environments](architecture/uv-environments.md) | Installed `neurodesk uv` CLI, project kernels, persistence, and migration |
+| [Remote compute jobs](architecture/remote-jobs.md) | Experimental CLI that runs DataLad-prepared Apptainer jobs on Slurm over SSH, with recovery and archives |
+| [Desktop environment](architecture/desktop.md) | LXDE over VNC/RDP through Guacamole, voxl desktop streaming, clipboard sync, Firefox profiles, office file associations |
 | [Glass runtime](architecture/glass.md) | Experimental CC native desktop, initialization, security and acceptance |
 | [Kasm image](architecture/kasm.md) | Separate Kasm Workspaces image, build and run commands, desktop startup, and home persistence |
 | [Webapp system](architecture/webapps.md) | Container-backed and hosted webapp tiles, and the build-time Jupyter config generation |
@@ -91,7 +95,10 @@ The startup sequence follows this order (per
    permissions are set at the cache root without traversing generated files.
    Notebook Intelligence setup uses `--no-refresh` to write configuration
    without probing saved server addresses. Interactive OpenCode changes still
-   refresh running Jupyter servers.
+   refresh running Jupyter servers. Valid user-installed kernelspecs are also
+   wrapped once so newly launched kernels refresh the Neurodesk environment;
+   malformed kernelspecs are skipped independently instead of stopping the
+   remaining batch.
    OpenCode database maintenance is
    deliberately excluded from this startup path; the manual recovery tool is
    described under

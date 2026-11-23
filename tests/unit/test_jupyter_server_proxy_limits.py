@@ -53,7 +53,10 @@ def install_server_config(monkeypatch):
     workspace.seed_agents_on_chat_save = lambda **_kwargs: None
     monkeypatch.setitem(sys.modules, "jupyter_ai_workspace", workspace)
 
-    config = SimpleNamespace(FileContentsManager=SimpleNamespace())
+    config = SimpleNamespace(
+        FileContentsManager=SimpleNamespace(),
+        MappingKernelManager=SimpleNamespace(),
+    )
     runpy.run_path(
         repo_path("config/jupyter/jupyter_server_config_extra.py"),
         init_globals={"c": config},
@@ -191,7 +194,7 @@ def test_proxy_patch_refuses_tcp_anchor_drift(tmp_path):
 def test_dockerfile_pins_and_patches_jupyter_server_proxy():
     dockerfile = repo_path("Dockerfile").read_text(encoding="utf-8")
 
-    package_pin = dockerfile.index("jupyter-server-proxy==4.6.0")
+    package_pin = dockerfile.index("jupyter-server-proxy==4.6.1")
     patch_install = dockerfile.index(
         "/opt/neurodesktop/patch_jupyter_server_proxy.py"
     )
@@ -199,3 +202,27 @@ def test_dockerfile_pins_and_patches_jupyter_server_proxy():
         "/opt/conda/bin/python /opt/neurodesktop/patch_jupyter_server_proxy.py"
     )
     assert package_pin < patch_install < patch_run
+
+
+def test_kernel_readiness_budget_reaches_manager_and_websocket(monkeypatch):
+    from traitlets.config import Config
+    from jupyter_server.services.kernels.kernelmanager import AsyncMappingKernelManager
+    from jupyter_server.services.kernels.connection.base import BaseKernelWebsocketConnection
+
+    workspace = ModuleType("jupyter_ai_workspace")
+    workspace.seed_agents_on_chat_save = lambda **kwargs: None
+    monkeypatch.setitem(sys.modules, "jupyter_ai_workspace", workspace)
+    monkeypatch.setattr(AsyncHTTPClient, "configure", lambda *args, **kwargs: None)
+    config = Config()
+    runpy.run_path(
+        repo_path("config/jupyter/jupyter_server_config_extra.py"),
+        init_globals={"c": config},
+    )
+    manager = AsyncMappingKernelManager(config=config)
+    kernel = manager.kernel_manager_factory(parent=manager)
+    connection = BaseKernelWebsocketConnection(parent=kernel, config=config)
+    assert manager.kernel_info_timeout == 180
+    assert connection.kernel_info_timeout == 180
+    config.MappingKernelManager.kernel_info_timeout = 240
+    manager.update_config(config)
+    assert BaseKernelWebsocketConnection(parent=kernel).kernel_info_timeout == 240

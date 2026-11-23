@@ -51,16 +51,17 @@ jobs:
           # the single source for the exact ASTRA/anywidget dependency pins.
           python -m pip install pytest httpx traitlets \
             jupyter-server jupyterhub==6.1.0 requests ipykernel websocket-client nibabel numpy ./extensions/t3-code-server ./extensions/astra-viewer
-          # ssh-keygen and ACLs for SSH permission tests, jq for terminal tests
+          # ssh-keygen and ACLs for SSH permission tests, jq for terminal tests,
+          # lmod for the module-usage hook (test_module_usage_hook.py skips without it)
           sudo apt-get update -qq
-          sudo apt-get install -y -qq openssh-client acl jq gcc libx11-dev xvfb x11-xserver-utils
+          sudo apt-get install -y -qq openssh-client acl jq gcc libx11-dev xvfb x11-xserver-utils lmod
 
       - name: Run unit tests
         env:
           NEURODESKTOP_LAUNCHER_TEST_NODE_MODULES: ${{ runner.temp }}/launcher-dom/node_modules
         run: |
           npm ci --prefix tools/javascript-lint --ignore-scripts --no-audit --no-fund
-          npm install --prefix "$RUNNER_TEMP/launcher-dom" --no-audit --no-fund jsdom@26.1.0 typescript@5.9.3 esbuild@0.28.2 @jupyterlab/docregistry@4.6.4 @jupyterlab/coreutils@6.6.4 @jupyterlab/services@7.6.4 @lumino/widgets@2.10.0
+          npm install --prefix "$RUNNER_TEMP/launcher-dom" --no-audit --no-fund jsdom@26.1.0 typescript@5.9.3 esbuild@0.28.2 @jupyterlab/docregistry@4.6.5 @jupyterlab/coreutils@6.6.5 @jupyterlab/services@7.6.5 @lumino/widgets@2.10.0
           pytest tests/unit -v
 
   worker-validation:
@@ -80,7 +81,7 @@ jobs:
           --directory "$RUNNER_TEMP/agentic-control"
       - name: Build worker image
         run: >-
-          docker build --tag neurodesktop-agentic:codex-0.162.1
+          docker build --tag neurodesktop-agentic:codex-0.168.0
           --build-arg WORKER_UID="$(id -u)" --build-arg WORKER_GID="$(id -g)"
           "$RUNNER_TEMP/agentic-control/config/agentic"
       - name: Validate an unchanged checkout without credentials or network

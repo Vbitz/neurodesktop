@@ -1,16 +1,16 @@
-# syntax=docker/dockerfile:1.27
+# syntax=docker/dockerfile:1.28
 
 # Pin to a specific jupyter/base-notebook date for reproducibility.
 # https://quay.io/repository/jupyter/base-notebook?tab=tags
-ARG BASE_IMAGE_TAG=2026-10-18
-ARG APPTAINER_VERSION=1.5.4
-ARG APPTAINER_GO_VERSION=1.27.2
-ARG APPTAINER_GRPC_VERSION=1.84.0
-ARG APPTAINER_CRYPTO_VERSION=0.58.0
+ARG BASE_IMAGE_TAG=2026-10-28
+ARG APPTAINER_VERSION=1.5.5
+ARG APPTAINER_GO_VERSION=1.27.4
+ARG APPTAINER_GRPC_VERSION=1.85.0
+ARG APPTAINER_CRYPTO_VERSION=0.59.0
 ARG CVMFS_VERSION=2.14.1+ubuntu26.04
 ARG CVMFS_RELEASE_VERSION=4.9
 ARG CVMFS_RELEASE_SHA256=88f4bb658c2c85e77aec39181f61dea8ab641b3481a0db2b00f453beabb05395
-ARG NPM_VERSION=12.2.1
+ARG NPM_VERSION=12.2.3
 ARG JUPYTER_BUILDER_VERSION=1.2.3
 
 FROM golang:${APPTAINER_GO_VERSION}-bookworm AS go-toolchain
@@ -118,7 +118,7 @@ USER root
 
 ARG BUILD_ONLY_APT_PACKAGES="build-essential libcairo2-dev libjpeg-turbo8-dev libpng-dev libtool-bin freerdp3-dev libvncserver-dev libssl-dev libwebp-dev libssh2-1-dev libpango1.0-dev"
 ARG GUACAMOLE_VERSION="1.6.0"
-ARG CODE_SERVER_VERSION="4.141.0"
+ARG CODE_SERVER_VERSION="4.144.0"
 ARG SHELL_QUOTE_VERSION="1.12.0"
 ARG PROXY_ADDR_VERSION="2.0.8"
 
@@ -143,14 +143,20 @@ RUN mkdir -p /opt/glass/bin \
 
 # Build Guacamole server
 RUN --mount=type=bind,source=config/guacamole/guacamole-1.6.0-GUACAMOLE-2328.patch,target=/tmp/guacamole/guacamole-1.6.0-GUACAMOLE-2328.patch,ro \
-    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 20 --max-time 300 \
-    "https://archive.apache.org/dist/guacamole/${GUACAMOLE_VERSION}/source/guacamole-server-${GUACAMOLE_VERSION}.tar.gz" \
-    -o /tmp/guacamole-server-${GUACAMOLE_VERSION}.tar.gz \
+    --mount=type=bind,source=config/guacamole/guacamole-1.6.0-GUACAMOLE-2270.patch,target=/tmp/guacamole/guacamole-1.6.0-GUACAMOLE-2270.patch,ro \
+    (curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 20 --max-time 300 \
+        "https://downloads.apache.org/guacamole/${GUACAMOLE_VERSION}/source/guacamole-server-${GUACAMOLE_VERSION}.tar.gz" \
+        -o /tmp/guacamole-server-${GUACAMOLE_VERSION}.tar.gz \
+    || curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 20 --max-time 300 \
+        "https://archive.apache.org/dist/guacamole/${GUACAMOLE_VERSION}/source/guacamole-server-${GUACAMOLE_VERSION}.tar.gz" \
+        -o /tmp/guacamole-server-${GUACAMOLE_VERSION}.tar.gz) \
     && tar xvf /tmp/guacamole-server-${GUACAMOLE_VERSION}.tar.gz -C /tmp \
     && rm /tmp/guacamole-server-${GUACAMOLE_VERSION}.tar.gz \
     && cd /tmp/guacamole-server-${GUACAMOLE_VERSION} \
     && echo 'aee31274ae1a17ced186b2ea4a54fb4f9d2ce76992c156b7371f6a540ee41461  /tmp/guacamole/guacamole-1.6.0-GUACAMOLE-2328.patch' | sha256sum -c - \
     && patch --batch --fuzz=0 -p1 < /tmp/guacamole/guacamole-1.6.0-GUACAMOLE-2328.patch \
+    && echo '828714cd5e38e39ed7b13ce46e40a66b30ad9612ea7b696987805a63ac871089  /tmp/guacamole/guacamole-1.6.0-GUACAMOLE-2270.patch' | sha256sum -c - \
+    && patch --batch --fuzz=0 -p1 < /tmp/guacamole/guacamole-1.6.0-GUACAMOLE-2270.patch \
     && CFLAGS="-std=gnu17 -Wno-error=deprecated-declarations" ./configure --with-init-dir=/etc/init.d \
     && grep -qx '#define _XOPEN_SOURCE 700' config.h \
     && sed -i '/^#define _XOPEN_SOURCE 700$/d' config.h \
@@ -220,13 +226,61 @@ ARG SLURM_ENV_VERSION="25.11.2"
 ARG SLURM_ENV_SHA256="9bfd844f746c1268d6e0cb14bda586b548b1c4b12f8c72181397d0cec9ce5d39"
 RUN apt-install-retry patchelf \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
-COPY config/slurm/build_env_compat.sh config/slurm/user-env-25.11.2.patch /tmp/slurm-env/
-RUN curl -fsSL --retry 5 "https://download.schedmd.com/slurm/slurm-${SLURM_ENV_VERSION}.tar.bz2" -o /tmp/slurm.tar.bz2 \
-    && echo "${SLURM_ENV_SHA256}  /tmp/slurm.tar.bz2" | sha256sum --check --strict \
+COPY config/slurm/build_env_compat.sh config/slurm/fetch_slurm_source.sh config/slurm/user-env-25.11.2.patch /tmp/slurm-env/
+# Falls back to SchedMD's GitHub release asset; both must match the pinned SHA-256.
+RUN bash /tmp/slurm-env/fetch_slurm_source.sh "${SLURM_ENV_VERSION}" "${SLURM_ENV_SHA256}" /tmp/slurm.tar.bz2 \
     && mkdir /tmp/slurm-source \
     && tar -xjf /tmp/slurm.tar.bz2 -C /tmp/slurm-source --strip-components=1 \
     && bash /tmp/slurm-env/build_env_compat.sh /tmp/slurm-source /opt/slurm-env \
     && rm -rf /tmp/slurm.tar.bz2 /tmp/slurm-source /tmp/slurm-env
+
+# voxl browser desktop streaming. Built against the runtime base so
+# the binary links the same distro x264, libyuv, Opus and PulseAudio sonames;
+# --locked holds every dependency to the crate's checksummed Cargo.lock.
+FROM quay.io/jupyter/base-notebook:${BASE_IMAGE_TAG} AS voxl-builder
+USER root
+ARG VOXL_VERSION="0.3.4"
+COPY --chmod=0755 scripts/apt_install_retry.sh /usr/local/bin/apt-install-retry
+RUN apt-install-retry \
+    cargo \
+    rustc \
+    esbuild \
+    pkg-config \
+    clang \
+    libclang-dev \
+    libx264-dev \
+    libyuv-dev \
+    libopus-dev \
+    libpulse-dev \
+    libxcb1-dev \
+    ca-certificates \
+    && CARGO_HOME=/tmp/cargo cargo install --locked --root /opt/voxl voxl-server --version "${VOXL_VERSION}" \
+    && /opt/voxl/bin/voxl --version \
+    && rm -rf /tmp/cargo /var/lib/apt/lists/*
+RUN --mount=type=bind,source=config/voxl/neurodesktop-shm-private.c,target=/tmp/neurodesktop-shm-private.c,ro \
+    clang -O2 -Wall -Wextra -Werror -o /opt/voxl/bin/neurodesktop-shm-private /tmp/neurodesktop-shm-private.c
+# Rebuild the distro's own Xvfb with voxl's XTEST scroll-axis patch, so voxl
+# scrolls smoothly instead of in wheel clicks. The source version is the xvfb
+# package the runtime installs, and Debian's configure flags are kept; only the
+# Xorg, Xnest, Xephyr and Xwayland servers are left out.
+RUN --mount=type=bind,source=config/voxl/xorg-server-xtest-scroll.patch,target=/tmp/xorg-server-xtest-scroll.patch,ro \
+    sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources \
+    && apt-get -o Acquire::Retries=5 update \
+    && xorg_version="$(apt-cache policy xvfb | awk '/Candidate:/ { print $2 }')" \
+    && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 install -y --no-install-recommends dpkg-dev \
+    && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 build-dep -y --no-install-recommends "xorg-server=${xorg_version}" \
+    && mkdir /tmp/xorg && cd /tmp/xorg \
+    && apt-get -o Acquire::Retries=5 source "xorg-server=${xorg_version}" \
+    && cd xorg-server-*/ \
+    && cp /tmp/xorg-server-xtest-scroll.patch debian/patches/ \
+    && echo xorg-server-xtest-scroll.patch >> debian/patches/series \
+    && dh_quilt_patch \
+    && dh_autoreconf \
+    && DEB_BUILD_PROFILES=noudeb debian/rules override_dh_auto_configure \
+        vars="--disable-xorg --disable-xnest --disable-xephyr --disable-xwayland" \
+    && make -j"$(nproc)" -C debian/build/main \
+    && install -D -m 0755 debian/build/main/hw/vfb/Xvfb /opt/voxl/libexec/Xvfb \
+    && cd / && rm -rf /tmp/xorg /var/lib/apt/lists/*
 
 ###############################################################################
 # Stage 2: Final runtime image
@@ -350,6 +404,10 @@ RUN retry bash -o pipefail -c 'wget -q \
     && mkdir /usr/local/tomcat/webapps \
     && sed -i -E '/<Connector port="8080" protocol="HTTP\/1\.1"/ {/maxHttpRequestHeaderSize=/! s|$| maxHttpRequestHeaderSize="65536"|;}' /usr/local/tomcat/conf/server.xml \
     && grep -q 'maxHttpRequestHeaderSize="65536"' /usr/local/tomcat/conf/server.xml \
+    # Tomcat otherwise listens on every local address. Guacamole is reached
+    # through authenticated Jupyter Server Proxy and needs no host-facing port.
+    && sed -i -E '/<Connector port="8080" protocol="HTTP\/1\.1"/ {/address=/! s|$| address="127.0.0.1"|;}' /usr/local/tomcat/conf/server.xml \
+    && grep -q 'address="127.0.0.1"' /usr/local/tomcat/conf/server.xml \
     # Make the Connector port settable per-user via CATALINA_OPTS=-Dport.http=NNNN.
     # Needed under Apptainer where multiple users share the host netns and cannot
     # all bind 8080. catalina.properties supplies 8080 as the fallback so running
@@ -426,14 +484,14 @@ ARG CVMFS_RELEASE_SHA256
 RUN mv /usr/bin/systemctl /usr/bin/systemctl.build-original \
     && printf '#!/bin/sh\nexit 0\n' > /usr/bin/systemctl \
     && chmod 0755 /usr/bin/systemctl \
-    && retry wget -q https://cvmrepo.s3.cern.ch/cvmrepo/apt/cvmfs-release-latest_all.deb -P /tmp \
-    && if ! echo "${CVMFS_RELEASE_SHA256}  /tmp/cvmfs-release-latest_all.deb" | sha256sum -c -; then \
+    && retry wget -q "https://cvmrepo.s3.cern.ch/cvmrepo/apt/pool/common/main/cvmfs-release_${CVMFS_RELEASE_VERSION}_all.deb" -O /tmp/cvmfs-release.deb \
+    && if ! echo "${CVMFS_RELEASE_SHA256}  /tmp/cvmfs-release.deb" | sha256sum -c -; then \
         echo "CVMFS release bootstrap changed; update CVMFS_RELEASE_VERSION and CVMFS_RELEASE_SHA256 together." >&2; \
         exit 1; \
     fi \
-    && dpkg -i /tmp/cvmfs-release-latest_all.deb \
+    && dpkg -i /tmp/cvmfs-release.deb \
     && test "$(dpkg-query -W -f='${Version}' cvmfs-release)" = "${CVMFS_RELEASE_VERSION}" \
-    && rm /tmp/cvmfs-release-latest_all.deb \
+    && rm /tmp/cvmfs-release.deb \
     && apt-install-retry \
     autofs \
     cvmfs="${CVMFS_VERSION}" \
@@ -515,7 +573,8 @@ RUN HOME=/root /bin/bash -lc 'set -euo pipefail; \
     tlmgr_path="$(echo /opt/TinyTeX/bin/*/tlmgr)"; \
     "${tlmgr_path}" option sys_bin /usr/local/bin >/dev/null; \
     "${tlmgr_path}" path add >/dev/null; \
-    "${tlmgr_path}" install \
+    retry "${tlmgr_path}" update --self; \
+    retry "${tlmgr_path}" install \
     tcolorbox \
     parskip \
     caption \
@@ -613,8 +672,24 @@ RUN --mount=type=bind,source=config/firefox/syspref.js,target=/tmp/syspref.js,ro
 
 USER ${NB_USER}
 
-# Install conda packages
-RUN retry conda install -c conda-forge nb_conda_kernels \
+# Install conda packages. conda-rattler-solver 0.2.0 pulls py-rattler 0.26.0,
+# whose native extension contains the vulnerable Rust zip 8.6.0 crate
+# (CVE-2026-115905). The released solver cannot use the fixed py-rattler 0.28
+# yet, so retain conda's supported libmamba solver and remove the unused
+# opt-in Rattler plugin. The system constraint prevents a later solve from
+# silently restoring a vulnerable py-rattler while allowing the fixed line.
+# libmamba 2.10.0 aborts with std::bad_alloc on every file:// channel, so keep
+# the 2.9.0 line and block exactly 2.10.0 until a fixed release replaces it.
+RUN retry conda install --solver=libmamba -c conda-forge nb_conda_kernels \
+    'libmamba=2.9.0' 'libmambapy=2.9.0' 'mamba=2.9.0' \
+    && conda config --system --set solver libmamba \
+    && conda remove --yes --force-remove conda-rattler-solver py-rattler \
+    && conda config --system --append disallowed_packages 'py-rattler <0.28.0' \
+    && conda config --system --append disallowed_packages 'libmamba ==2.10.0' \
+    && conda config --system --append disallowed_packages 'libmambapy ==2.10.0' \
+    && /opt/conda/bin/python -c 'import importlib.util; assert importlib.util.find_spec("rattler") is None' \
+    && test "$(conda config --show solver)" = 'solver: libmamba' \
+    && conda info --json >/dev/null \
     && conda clean --all -f -y \
     && conda config --system --prepend envs_dirs '~/conda-environments' \
     && rm -rf /home/${NB_USER}/.cache
@@ -632,10 +707,10 @@ RUN retry conda install -c conda-forge nb_conda_kernels \
 # ${NB_USER} via runuser so /opt/conda stays user-owned exactly as before;
 # `env PATH=` restores the conda-first PATH that runuser resets (the
 # jupyterlab-slurm source build needs jlpm and node on PATH).
-ARG BUST_CACHE_PIP=5
+ARG BUST_CACHE_PIP=6
 ARG PIP_VERSION="26.2.2"
-ARG CERTIFI_VERSION="2026.10.19"
-ARG UV_VERSION="0.13.4"
+ARG CERTIFI_VERSION="2026.10.23"
+ARG UV_VERSION="0.13.8"
 ARG JUPYTER_AI_VERSION="3.2.0"
 ARG JUPYTER_COLLABORATION_VERSION="4.4.2"
 ARG JUPYTER_COLLABORATION_REF="3bf11cb7b271b554998105a11e6c9b8c3e376615"
@@ -643,8 +718,9 @@ ARG ASTRA_SPEC_VERSION="0.0.14"
 ARG ASTRA_TOOLS_VERSION="0.2.18"
 ARG ANYWIDGET_VERSION="0.11.0"
 ARG IPYNIIVUE_VERSION="2.4.4"
-ARG SNAKEMAKE_VERSION="9.27.0"
+ARG SNAKEMAKE_VERSION="9.27.1"
 ARG PYJWT_VERSION="2.15.1"
+ARG BROTLI_VERSION="1.2.1"
 ARG JUPYTER_BUILDER_VERSION
 ARG JUPYTERLAB_SLURM_REF="8dccb39808f8a1b77712a9a5773a7d2601a56683"
 USER root
@@ -663,12 +739,15 @@ RUN --mount=type=bind,source=config/jupyter/patch_ipyniivue.py,target=/tmp/patch
     && chown -R ${NB_UID}:${NB_GID} /tmp/jupyterlab-slurm \
     && runuser -u ${NB_USER} -- env "PATH=${PATH}" /opt/conda/bin/pip install --upgrade "pip==${PIP_VERSION}" \
     && runuser -u ${NB_USER} -- env "PATH=${PATH}" /opt/conda/bin/pip install --build-constraint /tmp/build-constraints.txt --upgrade \
+    # Pin JupyterLab itself instead of inheriting the base image's release, so
+    # upgrades are explicit and Renovate tracks them.
+    jupyterlab==4.6.5 \
     datalad \
     nipype \
     niwrap \
     nbdev \
     nf-core \
-    pydra==1.0a11 \
+    pydra==1.0a12 \
     nipoppy \
     matplotlib \
     datalad-container \
@@ -676,10 +755,11 @@ RUN --mount=type=bind,source=config/jupyter/patch_ipyniivue.py,target=/tmp/patch
     osfclient \
     watermark \
     ipyniivue==${IPYNIIVUE_VERSION} \
-    jupyter-server-proxy==4.6.0 \
+    jupyterlab-niivue==0.2.7 \
+    jupyter-server-proxy==4.6.1 \
     jupyterlmod \
     jupyterlab-git \
-    notebook_intelligence==6.2.0 \
+    notebook_intelligence==6.3.0 \
     # Notebook Intelligence imports mcp.server.fastmcp, which MCP 2
     # removed. Keep the v1 API until Notebook Intelligence migrates.
     "mcp>=1.30.0,<2" \
@@ -687,16 +767,16 @@ RUN --mount=type=bind,source=config/jupyter/patch_ipyniivue.py,target=/tmp/patch
     # because their independent pre-1.0 releases otherwise drift underneath
     # the stable jupyter_ai metapackage.
     jupyter_ai==${JUPYTER_AI_VERSION} \
-    jupyter-ai-acp-client==0.3.3 \
+    jupyter-ai-acp-client==0.3.4 \
     jupyter-ai-chat-commands==0.0.4 \
-    jupyter-ai-persona-manager==0.2.2 \
+    jupyter-ai-persona-manager==0.2.3 \
     jupyter-ai-router==0.1.1 \
     jupyter-ai-tools==0.7.0 \
     # 0.3.2 still ships the issue #271 bug; the anchored build-time patch
     # below verifies its seams against every bump and fails loudly on a fix.
     jupyter-server-documents==0.3.3 \
     jupyter-server-mcp==0.3.0 \
-    jupyterlab-chat==0.25.2 \
+    jupyterlab-chat==0.25.3 \
     jupyterlab-commands-toolkit==0.2.0 \
     jupyterlab-notebook-awareness==0.2.0 \
     # Stay on the JupyterLab 4 collaboration line. Its published frontends
@@ -735,11 +815,15 @@ RUN --mount=type=bind,source=config/jupyter/patch_ipyniivue.py,target=/tmp/patch
     # before an HS256 verifier can reuse the public key as its HMAC secret
     # (CVE-2026-102268). Keep this transitive dependency on the fixed release.
     PyJWT==${PYJWT_VERSION} \
+    # The base image's Conda Brotli 1.2.0 decoder has an out-of-bounds write
+    # (GHSA-9v8h-qqgm-4m35). Replace it with the fixed release.
+    brotli==${BROTLI_VERSION} \
     "requests>=2.34.2" \
     "chardet<8" \
     && runuser -u ${NB_USER} -- env "PATH=${PATH}" /opt/conda/bin/pip install --upgrade "litellm>=1.105.1" \
     && test "$(/opt/conda/bin/python -c 'import importlib.metadata as m; print(m.version("pip"))')" = "${PIP_VERSION}" \
     && test "$(/opt/conda/bin/python -c 'import importlib.metadata as m; print(m.version("certifi"))')" = "${CERTIFI_VERSION}" \
+    && test "$(/opt/conda/bin/python -c 'import importlib.metadata as m; print(m.version("brotli"))')" = "${BROTLI_VERSION}" \
     && UV_RELEASE="$(/opt/conda/bin/uv --version)" && test "${UV_RELEASE%% (*}" = "uv ${UV_VERSION}" \
     # Replace public API sample tokens before committing source or bytecode to a layer.
     && /opt/conda/bin/python /tmp/sanitize_ghapi_examples.py \
@@ -848,8 +932,8 @@ RUN --mount=type=bind,source=config/agents/patch_nbi.py,target=/tmp/patch_nbi.py
 # MyST 2.7.0 uses pnpm. Its published metadata requests @jupyter/ydoc 3.x,
 # while JupyterLab 4.6 provides 4.x, so compile against an exact current YDoc
 # and retain that exact version in both the manifest and lockfile.
-ARG MYST_PNPM_VERSION="11.28.6"
-ARG MYST_YDOC_VERSION="4.1.1"
+ARG MYST_PNPM_VERSION="11.28.10"
+ARG MYST_YDOC_VERSION="4.2.0"
 RUN MYST_VERSION="$(/opt/conda/bin/pip show jupyterlab_myst | awk '/^Version:/ {print $2}')" \
     && RISE_VERSION="$(/opt/conda/bin/pip show jupyterlab_rise | awk '/^Version:/ {print $2}')" \
     && MYST_PACKAGE_DIR="$(/opt/conda/bin/python -c 'import jupyterlab_myst, os; print(os.path.dirname(jupyterlab_myst.__file__))')" \
@@ -982,9 +1066,11 @@ RUN echo "Installing neurocommand ref ${NEUROCOMMAND_REF}" \
 # frontend assets. The adapter is installed without its bundled binary and
 # drives this install via CODEX_PATH. Validate CLI upgrades with the actual T3
 # and ACP initialization probes, especially outside the adapter dependency range.
-ARG CODEX_CLI_VERSION="0.163.0"
-ARG CLAUDE_CODE_VERSION="2.1.302"
+ARG CODEX_CLI_VERSION="0.167.0"
+ARG CLAUDE_CODE_VERSION="2.1.316"
 RUN npm_config_cache=/tmp/npm-root-cache npm install -g "@openai/codex@${CODEX_CLI_VERSION}" \
+    && codex_installed_version="$(codex --version)" \
+    && test "$codex_installed_version" = "codex-cli ${CODEX_CLI_VERSION}" \
     && find "$(npm root -g)/@openai" -type f \( -name "*.js.map" -o -name "*.css.map" \) -delete \
     && rm -rf /root/.npm /tmp/npm-root-cache /home/${NB_USER}/.npm \
     && su - "${NB_USER}" -c "retry bash -o pipefail -c 'curl -fsSL https://claude.ai/install.sh | bash -s -- ${CLAUDE_CODE_VERSION}'" \
@@ -1001,17 +1087,18 @@ RUN npm_config_cache=/tmp/npm-root-cache npm install -g "@openai/codex@${CODEX_C
 # Install OpenCode CLI (open source AI coding agent). OPENCODE_VERSION pins
 # the release so the terminal wrapper and the default config are tested as a
 # set; override at build time to bump it, or set it to an empty value to
-# install the latest release.
-ARG OPENCODE_VERSION="1.19.3"
-RUN retry bash -o pipefail -c 'curl -fsSL https://opencode.ai/install | bash -s -- ${OPENCODE_VERSION:+--version "${OPENCODE_VERSION}"}' \
+# install the latest release. OpenCode 2 ships from its own installer: the
+# original one refuses every 2.x version.
+ARG OPENCODE_VERSION="2.2.5"
+RUN retry bash -o pipefail -c 'curl -fsSL https://opencode.ai/v2/install | bash -s -- ${OPENCODE_VERSION:+--version "${OPENCODE_VERSION}"}' \
     && mv /home/jovyan/.opencode/bin/opencode /usr/bin/opencode \
-    && rm -rf /home/${NB_USER}/.cache /home/${NB_USER}/.local
+    && rm -rf /home/${NB_USER}/.opencode /home/${NB_USER}/.cache /home/${NB_USER}/.local
 
 # Install only the static Tailscale CLI and daemon; starting and authenticating
 # the userspace daemon is an explicit user action. Do not install systemd units.
-ARG TAILSCALE_VERSION="1.104.1"
-ARG TAILSCALE_AMD64_SHA256="108d1d96ecf410d305571e173516f27038f870919a9b89c914a167c6d33a4528"
-ARG TAILSCALE_ARM64_SHA256="f60294374967f3dfd8cf57bbbd474d6cfce32d123e3a8ddeab82a87940daa806"
+ARG TAILSCALE_VERSION="1.104.4"
+ARG TAILSCALE_AMD64_SHA256="624ea093d47d62cf56f17b8332d74b8decda4a1faa610ebc60a1de334b2b3dc9"
+ARG TAILSCALE_ARM64_SHA256="a1c249ce6bdebef62e1ae3b997595555bce2ae4709bf95a718e9ca7a129dad7e"
 RUN set -eu; \
     tailscale_arch="$(dpkg --print-architecture)"; \
     case "${tailscale_arch}" in \
@@ -1030,23 +1117,21 @@ RUN set -eu; \
     test "$(tailscaled --version | head -n 1)" = "${TAILSCALE_VERSION}"; \
     rm -rf /tmp/tailscale.tgz "/tmp/${tailscale_archive}"
 
-# Install the headless T3 Code server from its pinned, self-contained build.
-# The release publishes one executable per platform, with its web client and
-# prebuilt native modules bundled beside it, so this layer needs no compiler
-# and runs no install script. A checked-in lockfile cannot serve that shape:
-# npm records only the bundled tree of the platform it ran on, then refuses
-# `npm ci` everywhere and silently drops the optional platform package on the
-# other architecture. The exact pins determine the tree instead — this
-# manifest pins `t3`, `t3` pins each `@t3code/t3-<platform>` build, and each
-# build carries its dependencies inside its own tarball. The executable links
-# against libatomic, which the checks below prove is present.
+# Install the headless T3 Code server from its pinned, self-contained release
+# build. Since 0.1.1 the `t3` npm package is only a launcher that downloads this
+# same archive into each user's ~/.t3 on first run; install the archive itself
+# so the image works offline and every user runs the verified build. Each
+# archive bundles its web client, its native modules (including the node-pty
+# prebuild) and libatomic, so this layer compiles nothing and runs no install
+# script. Running the executable directly also keeps T3's npm self-update flow
+# away from the image-owned server.
 # Use a patched relay client through T3's executable override. Verify downloads before
 # installing; keeping it on PATH avoids per-user downloads and install prompts.
-ARG T3_CLOUDFLARED_VERSION="2026.10.1"
+ARG T3_CLOUDFLARED_VERSION="2026.10.7"
 RUN set -eu; \
     case "$(dpkg --print-architecture)" in \
-      amd64) relay_arch=amd64; relay_sha=3bfc539f45d2620c71debb7a86be0efa737ed5ccbad9eb85c787116900e5c586 ;; \
-      arm64) relay_arch=arm64; relay_sha=2c65dfabf616c40efc7545d107d7a57ad5e21377e2964b7e88af19a238074a46 ;; \
+      amd64) relay_arch=amd64; relay_sha=1f99fb518b83dec2ba8d870a7cc991d82a77e6196295a3d2754ba17ab9f91872 ;; \
+      arm64) relay_arch=arm64; relay_sha=3df43aedc9ff291d1735b5cb576cb97e0b157488796db2e32b28aecabb445775 ;; \
       *) exit 1 ;; \
     esac; \
     curl -fsSL --retry 5 --retry-all-errors --connect-timeout 20 --max-time 300 \
@@ -1057,34 +1142,37 @@ RUN set -eu; \
     cloudflared --version; \
     rm /tmp/t3-cloudflared
 
-ARG T3_CODE_VERSION="0.1.0"
-RUN --mount=type=bind,source=config/agents/t3-code/package.json,target=/tmp/t3-code/package.json,ro \
-    --mount=type=bind,source=config/agents/t3-provider-bin,target=/tmp/t3-provider-bin,ro \
+ARG T3_CODE_VERSION="0.1.5"
+ARG T3_CODE_AMD64_SHA256="21d50dcc9c634221b11b58d6a94350d2c6ee36905737b054b11fa4eba295a98b"
+ARG T3_CODE_ARM64_SHA256="389362e2a349ea62b38d9bc708f4fca2381936cccb2d326b5fc5d074b072aef1"
+RUN --mount=type=bind,source=config/agents/t3-provider-bin,target=/tmp/t3-provider-bin,ro \
     set -eux; \
     node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 24 || (major === 24 && minor < 10)) process.exit(1)'; \
-    test "$(node -p 'require("/tmp/t3-code/package.json").dependencies.t3')" = "${T3_CODE_VERSION}"; \
-    apt-get update; \
-    apt-install-retry libatomic1; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) t3_arch=x64; t3_sha256="${T3_CODE_AMD64_SHA256}" ;; \
+        arm64) t3_arch=arm64; t3_sha256="${T3_CODE_ARM64_SHA256}" ;; \
+        *) echo "Unsupported T3 Code architecture" >&2; exit 1 ;; \
+    esac; \
+    t3_archive="t3-${T3_CODE_VERSION}-linux-${t3_arch}.tar.gz"; \
+    curl -fsSL --retry 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+        "https://github.com/pingdotgg/t3code/releases/download/v${T3_CODE_VERSION}/${t3_archive}" \
+        -o /tmp/t3-code.tar.gz; \
+    printf '%s  %s\n' "${t3_sha256}" /tmp/t3-code.tar.gz | sha256sum -c -; \
     install -d -m 0755 /opt/t3-code /opt/neurodesktop/t3-provider-bin; \
-    install -m 0644 /tmp/t3-code/package.json /opt/t3-code/; \
-    cd /opt/t3-code; \
-    npm_config_cache=/tmp/npm-t3-cache npm install --omit=dev --ignore-scripts \
-        --no-package-lock --no-audit --no-fund; \
-    test "$(ls -d /opt/t3-code/node_modules/@t3code/* | wc -l)" -eq 1; \
-    t3_platform="$(ls -d /opt/t3-code/node_modules/@t3code/*)"; \
-    test "$(node -p "require(\"${t3_platform}/package.json\").version")" = "${T3_CODE_VERSION}"; \
-    test -x "${t3_platform}/t3"; \
-    test -f "${t3_platform}/client/index.html"; \
-    test -f "${t3_platform}/node_modules/node-pty/prebuilds/linux-$(node -p process.arch)/pty.node"; \
-    find /opt/t3-code -type f \( -name "*.js.map" -o -name "*.css.map" \) -delete; \
-    test "$(/opt/t3-code/node_modules/.bin/t3 --version)" = "t3 v${T3_CODE_VERSION}"; \
+    tar -xzf /tmp/t3-code.tar.gz -C /opt/t3-code --strip-components=1 --no-same-owner; \
+    rm /tmp/t3-code.tar.gz; \
+    test -x /opt/t3-code/t3; \
+    test -f /opt/t3-code/client/index.html; \
+    test -f "/opt/t3-code/node_modules/node-pty/prebuilds/linux-${t3_arch}/pty.node"; \
+    if ldd /opt/t3-code/t3 | grep "not found"; then exit 1; fi; \
+    find /opt/t3-code -type f -name "*.map" -delete; \
+    test "$(/opt/t3-code/t3 --version)" = "t3 v${T3_CODE_VERSION}"; \
     install -m 0755 /tmp/t3-provider-bin/codex /tmp/t3-provider-bin/claude \
         /tmp/t3-provider-bin/opencode /tmp/t3-provider-bin/hostnamectl /opt/neurodesktop/t3-provider-bin/; \
-    ln -s /opt/t3-code/node_modules/.bin/t3 /usr/local/bin/t3; \
+    ln -s /opt/t3-code/t3 /usr/local/bin/t3; \
     chown -R root:users /opt/t3-code /opt/neurodesktop/t3-provider-bin; \
     chmod -R a+rX /opt/t3-code /opt/neurodesktop/t3-provider-bin; \
-    apt-get clean; \
-    rm -rf /var/lib/apt/lists/* /tmp/npm-t3-cache /root/.npm /home/${NB_USER}/.npm
+    rm -rf /root/.t3
 
 # Expose the installed agent families as Jupyter AI ACP personas. These
 # adapters are runtime-only and deliberately live after the expensive
@@ -1099,8 +1187,8 @@ RUN --mount=type=bind,source=config/agents/t3-code/package.json,target=/tmp/t3-c
 # CODEX_CLI_VERSION rather than its bundled dependency. The
 # size assertion fails the build if a future adapter release relocates its
 # vendored binary and reintroduces the duplicate.
-ARG CODEX_ACP_VERSION="2.2.2"
-ARG CLAUDE_AGENT_ACP_VERSION="0.92.0"
+ARG CODEX_ACP_VERSION="2.6.0"
+ARG CLAUDE_AGENT_ACP_VERSION="0.99.1"
 RUN npm_config_cache=/tmp/npm-acp-cache retry npm install -g \
     "@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}" \
     "@agentclientprotocol/claude-agent-acp@${CLAUDE_AGENT_ACP_VERSION}" \
@@ -1141,15 +1229,17 @@ RUN --mount=type=bind,source=config/lightcone,target=/tmp/lightcone-adapter,ro \
     && PATH=/opt/uv/tools/lightcone-cli/bin:${PATH} dask --version \
     && rm -rf /tmp/lightcone-cli-src /tmp/lightcone-cli.tar.gz
 
-# Neurodesk's FreeBrowse fork supplies the authenticated document viewer.
+# Neurodesk's FreeBrowse fork supplies the optional authenticated document viewer.
 # Build both the serverless app and federated extension from the same source.
 ARG FREEBROWSE_REF="5f64059c81b7b9eb01ca6a0d261aeb17d27053d2"
-RUN retry git clone https://github.com/neurodesk/freebrowse.git /tmp/freebrowse \
+RUN --mount=type=bind,source=config/jupyter/configure_freebrowse_defaults.py,target=/tmp/configure_freebrowse_defaults.py,ro \
+    retry git clone https://github.com/neurodesk/freebrowse.git /tmp/freebrowse \
     && git -C /tmp/freebrowse checkout --detach "${FREEBROWSE_REF}" \
     && test "$(git -C /tmp/freebrowse rev-parse HEAD)" = "${FREEBROWSE_REF}" \
     && cd /tmp/freebrowse/frontend \
     && npm_config_cache=/tmp/freebrowse-npm-cache retry npm ci --no-audit --no-fund \
     && npm run build:jupyter \
+    && /opt/conda/bin/python /tmp/configure_freebrowse_defaults.py /tmp/freebrowse/jupyter/src/index.ts \
     && cd /tmp/freebrowse/jupyter \
     && YARN_ENABLE_IMMUTABLE_INSTALLS=0 retry /opt/conda/bin/jlpm install \
     && /opt/conda/bin/jlpm build:lib \
@@ -1227,6 +1317,7 @@ RUN --mount=type=bind,source=config/jupyter/kernel_wrapper.sh,target=/tmp/kernel
 # Create Guacamole configurations (user-mapping.xml gets filled in the startup.sh script)
 RUN --mount=type=bind,source=config/guacamole,target=/tmp/guacamole,ro \
     mkdir -p /etc/guacamole \
+    && install -m 0755 /tmp/guacamole/configure_tomcat.py /opt/neurodesktop/configure_tomcat.py \
     && echo -e "user-mapping: /etc/guacamole/user-mapping.xml\nguacd-hostname: 127.0.0.1" > /etc/guacamole/guacamole.properties \
     && echo -e "[server]\nbind_host = 127.0.0.1\nbind_port = 4822" > /etc/guacamole/guacd.conf \
     && install -m 0644 -o ${NB_UID} -g ${NB_GID} /tmp/guacamole/user-mapping-vnc.xml /etc/guacamole/user-mapping-vnc.xml \
@@ -1336,6 +1427,9 @@ EOF
 
 ENV DONT_PROMPT_WSL_INSTALL=1
 ENV LMOD_CMD=/usr/share/lmod/lmod/libexec/lmod
+# Lmod loads SitePackage.lua from here; it records Neurodesk module loads for
+# neurodesk-cite.
+ENV LMOD_PACKAGE_PATH=/opt/neurodesktop/lmod
 # jupyter_server_mcp embeds FastMCP, whose startup banner (an ASCII box with a
 # hosting ad) would otherwise land in the Jupyter server log on every boot.
 ENV FASTMCP_SHOW_SERVER_BANNER=0
@@ -1532,10 +1626,12 @@ RUN --mount=type=bind,source=config/jupyter/restore_home_defaults.sh,target=/tmp
 # Switch to root user
 USER root
 
-# Install Glass dependencies before runtime configuration replaces apt-get
-# with the package-only wrapper, which rejects build-time apt options.
+# Install Glass dependencies, and Xvfb and libyuv0 for voxl, before runtime
+# configuration replaces apt-get with the package-only wrapper, which rejects
+# build-time apt options.
 RUN apt-install-retry systemd systemd-sysv xauth xserver-xorg-core \
     xserver-xorg-input-evdev x11-xserver-utils libx11-6 fonts-dejavu-core \
+    xvfb libyuv0 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install local runtime configuration late. This layer intentionally sits after
@@ -1547,6 +1643,7 @@ RUN --mount=type=bind,source=config/jupyter,target=/tmp/jupyter,ro \
     --mount=type=bind,source=config/guacamole,target=/tmp/guacamole,ro \
     --mount=type=bind,source=config/ssh,target=/tmp/ssh,ro \
     --mount=type=bind,source=config/slurm,target=/tmp/slurm,ro \
+    --mount=type=bind,source=config/remote_jobs,target=/tmp/remote_jobs,ro \
     --mount=type=bind,source=config/lxde,target=/tmp/lxde,ro \
     --mount=type=bind,source=config/lmod,target=/tmp/lmod,ro \
     --mount=type=bind,source=scripts/generate_jupyter_config.py,target=/tmp/generate_jupyter_config.py,ro \
@@ -1561,11 +1658,7 @@ RUN --mount=type=bind,source=config/jupyter,target=/tmp/jupyter,ro \
     install -D -m 0644 /tmp/jupyter/neurodesk_brain_logo.svg /opt/neurodesk_brain_logo.svg \
     && install -D -m 0644 /tmp/jupyter/neurodesk_brain_icon.svg /opt/neurodesk_brain_icon.svg \
     && install -D -m 0644 /tmp/jupyter/vscode_logo.svg /opt/vscode_logo.svg \
-    && install -d -m 0755 /opt/neurodesk/icons \
-    && cp -a /tmp/jupyter/webapp_icons/. /opt/neurodesk/icons/ \
     && install -D -m 0644 /tmp/jupyter/webapp_links.json /opt/config/jupyter/webapp_links.json \
-    && install -d -m 0755 /opt/config/jupyter/webapp_icons \
-    && cp -a /tmp/jupyter/webapp_icons/. /opt/config/jupyter/webapp_icons/ \
     && install -D -m 0644 /tmp/lxde/background.png /usr/share/lxde/wallpapers/desktop_wallpaper.png \
     && install -m 0755 /tmp/lxde/neurodesktop-gpu-check /usr/local/bin/neurodesktop-gpu-check \
     && ln -sf /opt/VirtualGL/bin/eglinfo /usr/local/bin/vgl-eglinfo \
@@ -1578,6 +1671,7 @@ RUN --mount=type=bind,source=config/jupyter,target=/tmp/jupyter,ro \
     && install -D -m 0644 /tmp/lxde/pcmanfm.conf /etc/xdg/pcmanfm/LXDE/pcmanfm.conf \
     && install -D -m 0644 /tmp/lxde/lxterminal.conf /usr/share/lxterminal/lxterminal.conf \
     && install -D -m 0644 /tmp/lmod/module.sh /usr/share/module.sh \
+    && install -D -m 0644 /tmp/lmod/SitePackage.lua /opt/neurodesktop/lmod/SitePackage.lua \
     && install -D -m 0644 /tmp/lxde/rc.xml /etc/xdg/openbox/rc.xml \
     && sed -i 's/#user_allow_other/user_allow_other/g' /etc/fuse.conf \
     && rm -f /usr/bin/lxpolkit \
@@ -1609,6 +1703,10 @@ RUN --mount=type=bind,source=config/jupyter,target=/tmp/jupyter,ro \
     && install -m 0755 /tmp/guacamole/ensure_rdp_backend.sh /opt/neurodesktop/ensure_rdp_backend.sh \
     && install -m 0755 /tmp/jupyter/environment_variables.sh /opt/neurodesktop/environment_variables.sh \
     && install -m 0755 /tmp/jupyter/kernel_wrapper.sh /opt/neurodesktop/kernel_wrapper.sh \
+    && install -m 0755 /tmp/jupyter/neurodesk_kernel.py /usr/local/bin/neurodesk-kernel \
+    && install -m 0755 /tmp/jupyter/neurodesk_cite.py /usr/local/bin/neurodesk-cite \
+    && install -m 0755 /tmp/jupyter/neurodesk_cli.py /usr/local/bin/neurodesk \
+    && install -m 0755 /tmp/jupyter/uv_kernel_prototype.py /usr/local/bin/neurodesk-uv \
     && install -m 0755 /tmp/jupyter/jupyterlmod_modulepath.py /opt/neurodesktop/jupyterlmod_modulepath.py \
     && install -m 0644 /tmp/jupyter/jupyter_ai_workspace.py /opt/neurodesktop/jupyter_ai_workspace.py \
     && install -m 0755 /tmp/jupyter/external_webapp_redirect.py /opt/neurodesktop/external_webapp_redirect.py \
@@ -1619,6 +1717,10 @@ RUN --mount=type=bind,source=config/jupyter,target=/tmp/jupyter,ro \
     && install -m 0755 /tmp/slurm/neurodesk-lc-materialize /usr/local/bin/neurodesk-lc-materialize \
     && install -m 0644 /tmp/slurm/lightcone_materialize.py /opt/neurodesktop/lightcone_materialize.py \
     && install -m 0644 /tmp/slurm/lightcone-compute.yaml /opt/neurodesktop/lightcone-compute.yaml \
+    && cp -a /tmp/remote_jobs /tmp/neurodesk-jobs-build \
+    && /opt/conda/bin/pip install --no-deps /tmp/neurodesk-jobs-build \
+    && install -m 0755 /tmp/remote_jobs/neurodesk-jobs /usr/local/bin/neurodesk-jobs \
+    && rm -rf /tmp/neurodesk-jobs-build \
     # Only the container tier ships: tests/unit/ asserts on repository sources
     # and runs in CI on a checkout, so it has nothing to say inside the image.
     && cp -a /tmp/tests/container /opt/tests \
@@ -1730,6 +1832,13 @@ RUN --mount=type=bind,source=config/jupyter/patch_jupyter_ai_acp_client.py,targe
     && /opt/conda/bin/python /opt/neurodesktop/patch_jupyter_ai_acp_client.py
 
 COPY --from=builder /opt/glass/bin/ /usr/local/bin/
+# voxl streams a dedicated Xvfb LXDE desktop as H.264 over one WebSocket; see
+# docs/architecture/desktop.md#voxl-desktop-streaming. The xvfb package above
+# supplies the libraries and XKB tools for voxl's patched Xvfb, which stays off
+# PATH so Glass and xvfb-run keep the distro server.
+COPY --from=voxl-builder /opt/voxl/bin/voxl /opt/voxl/bin/neurodesktop-shm-private /usr/local/bin/
+COPY --from=voxl-builder /opt/voxl/libexec/Xvfb /usr/local/libexec/voxl/Xvfb
+COPY --chmod=0755 config/voxl/voxl.sh /opt/neurodesktop/voxl.sh
 COPY --chmod=0755 config/glass/ /opt/neurodesktop/glass/
 RUN find /opt/neurodesktop/glass -type f -exec chmod 0644 {} + \
     && install -m 0644 /opt/neurodesktop/glass/neurodesktop-glass.service /etc/systemd/system/ \

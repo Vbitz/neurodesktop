@@ -4,7 +4,7 @@ description: T3 Code in JupyterLab, server lifecycle, provider paths, persistent
   state, and desktop connection procedures
 parent: ../architecture.md
 status: current
-last-reviewed: "2026-10-16"
+last-reviewed: "2026-11-02"
 ---
 
 # T3 Code remote access
@@ -37,9 +37,16 @@ Provider authentication still belongs to the container, as described
 This route requires only the Jupyter endpoint, including its existing HTTPS
 and JupyterHub user prefix. It does not require Tailscale or a separately
 published T3 port. Leave `NEURODESKTOP_T3_CODE_HOST` at its loopback default
-when using only JupyterLab. The launcher reports when the sidecar is not ready. The supervisor requires
-an HTTP response from T3's local environment endpoint before reporting readiness;
-a listening TCP port alone does not mean startup has finished.
+when using only JupyterLab. The launcher reports when the sidecar is still
+starting. The supervisor requires an HTTP response from T3's local environment
+endpoint before reporting readiness; a listening TCP port alone does not mean
+startup has finished.
+
+If every start attempt fails, the launcher offers **Retry SciGent**. It restarts
+only the T3 process group with a fresh retry budget. Jupyter kernels, terminals
+and open notebooks keep running. Retry has no effect while T3 is starting or
+ready, so it cannot interrupt an active chat. See
+[Lifecycle and state](#lifecycle-and-state) for the retry budget.
 
 The server extension authenticates `/neurodesk-t3/` and proxies HTTP and
 WebSockets to its supervised process. It strips Jupyter credentials before
@@ -119,7 +126,7 @@ for this setup. In a JupyterLab terminal,
 run the guided setup as the notebook user:
 
 ```bash
-t3_neurodesk_setup
+neurodesk t3
 ```
 
 The [setup script](../../scripts/t3_neurodesk_setup.py) checks T3, starts a
@@ -162,7 +169,7 @@ the tailnet, run
 For a local check without login prompts, configuration changes, or tokens:
 
 ```bash
-t3_neurodesk_setup --check
+neurodesk t3 --check
 ```
 
 This checks local configuration, not reachability from the desktop. The
@@ -296,10 +303,16 @@ that login node. It does not enter the Neurodesktop allocation.
 ## Lifecycle and state
 
 [`neurodesk_t3_code`](../../extensions/t3-code-server/neurodesk_t3_code/)
-is a Jupyter `ExtensionApp`. It owns one T3 process group, waits for the fixed
-port, restarts a failed server up to five times, and stops the process group
-when Jupyter stops. A port conflict parks the sidecar and leaves Jupyter
-available.
+is a Jupyter `ExtensionApp`. It owns one T3 process group and stops it when
+Jupyter stops. Each start attempt has
+`NEURODESKTOP_T3_CODE_STARTUP_TIMEOUT` seconds, 120 by default, to answer HTTP
+before the supervisor stops that attempt. It makes up to five attempts, waiting
+1, 2, 4 and 8 seconds between them, then parks the sidecar and leaves Jupyter
+available. A port conflict or an unexpected supervisor error parks the sidecar
+at once, so **Retry SciGent** can recover it after the cause is repaired. Readiness waiters,
+including the T3 Connect restore, wait for the final outcome of the whole retry
+budget rather than one attempt. `POST /neurodesk-t3-retry` starts a parked
+sidecar again; it requires Jupyter authentication and XSRF protection.
 
 The extension runs T3 only as the notebook user. It refuses uid 0 and a home
 directory owned by another uid. T3 stores its database, connection identity,
@@ -368,8 +381,10 @@ No terminal OpenCode launch is needed. The default server is
 The [shared discovery contract](coding-agents.md#opencode-terminal-wrapper)
 describes deadlines, custom configuration, offline behavior, and process-local
 configuration. Discovery runs only when starting a new OpenCode server or ACP
-process. A native config plugin applies the observation separately after each
-project's settings resolve, including projects opened later in the same server.
+process. A native model-transform plugin applies the observation separately
+after each project's settings resolve, including projects opened later in the
+same server. T3 0.1.5 drives OpenCode 2 through its own OpenCode 2 client: it
+supplies `OPENCODE_PASSWORD`, which the quiet launcher passes through.
 Existing chats keep their running server and selected model.
 
 T3 reloads the login-shell `PATH` at startup, which can put the interactive
@@ -393,25 +408,23 @@ than using T3's systemd service installer or self-update flow.
 
 ## Build and architecture limits
 
-T3 0.1.0 publishes one self-contained executable per platform, with its web
-client, its `node-pty` prebuild and its other native modules bundled beside it.
-The PTY binding lives under `node_modules/node-pty/prebuilds/linux-x64/pty.node`
-on amd64 and `node_modules/node-pty/prebuilds/linux-arm64/pty.node` on arm64.
-The Dockerfile installs the manifest under `config/agents/t3-code` into
-`/opt/t3-code`, so the layer compiles nothing, runs no install script, and
-keeps exactly one `@t3code/t3-linux-<arch>` build. The executable links
-against `libatomic1`, which the layer installs; its build-time version check
-fails if that library is missing.
+T3 publishes one self-contained archive per platform on its GitHub release,
+with the executable, its web client, its `node-pty` prebuild, its other native
+modules and `libatomic` bundled together. The PTY binding lives under
+`node_modules/node-pty/prebuilds/linux-x64/pty.node` on amd64 and
+`node_modules/node-pty/prebuilds/linux-arm64/pty.node` on arm64. The
+Dockerfile downloads the archive for `T3_CODE_VERSION`, verifies it against
+the pinned `T3_CODE_AMD64_SHA256` or `T3_CODE_ARM64_SHA256`, and extracts it
+into `/opt/t3-code`. The layer compiles nothing, runs no install script, and
+fails if the executable has an unresolved shared library.
 
-This packaging replaces the earlier locked npm tree. `npm ci` cannot install
-it: npm records only the bundled tree of the platform that generated the
-lockfile, then refuses the install everywhere else and silently drops the
-optional platform package on the other architecture. The exact pins carry the
-same guarantee instead — the manifest pins `t3`, `t3` pins each
-`@t3code/t3-<platform>` build, and each build carries its dependencies inside
-its own tarball.
+Since 0.1.1 the `t3` npm package is only a launcher. It downloads the same
+archive into the caller's `~/.t3/runtime` on first run, which would make each
+user fetch about 370 MB and bypass the image's checksum. The image therefore
+runs `/opt/t3-code/t3` directly. A version bump must refresh both SHA256
+values from the release's `SHA256SUMS`.
 
 Both amd64 and arm64 images must pass the installed server and PTY checks.
-0.1.0 ships a resource monitor for both Linux architectures, so arm64 no
+The release ships a resource monitor for both Linux architectures, so arm64 no
 longer omits resource telemetry; server, terminal, pairing, and provider
 behavior must still pass.

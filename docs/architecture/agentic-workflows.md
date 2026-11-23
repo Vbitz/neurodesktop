@@ -3,7 +3,7 @@ title: Agentic CI workflows
 description: Failure reporting, issue repair, scheduled maintenance, and subscription-authenticated Codex execution through conventional Actions
 parent: ../architecture.md
 status: current
-last-reviewed: "2026-10-23"
+last-reviewed: "2026-11-14"
 ---
 
 # Agentic CI workflows
@@ -75,6 +75,32 @@ The issue workflow delegates investigation, implementation, and validation to
 no separate manual handoff between diagnosis and fixing. A confirmed defect
 with a feasible fix leads to a draft PR. A task with no justified code change
 reports its evidence or blocker.
+
+### Incident repair scope
+
+Many workflow incidents report the state of an external service rather than
+of this repository. The [CVMFS health workflow](cvmfs.md#cvmfs) checks every
+selectable mirror, so a mirror that falls behind replication or is briefly
+unreachable fails its job until it recovers. Such a failure is not by itself
+evidence of a repository defect. The worker prompt therefore directs the agent
+to return `no_change` with its evidence for remote unreachability, lag, stale
+revisions, or incomplete inventories. A repository change requires a
+demonstrated defect, such as a wrong hostname, port, path, checker, or selector,
+or an explicit maintainer decision to decommission the endpoint. A pass of the
+same check from another endpoint, runner, or attempt is evidence about the
+cause, not proof that the failing endpoint's configuration is correct.
+
+A repair must not make the original check pass by removing the endpoint,
+skipping or disabling the check, or loosening its thresholds, retries, or
+grace periods. Removing a temporarily lagging mirror also removes a fallback
+that users could select after it recovers. Proven repository defects remain
+eligible for an ordinary fix.
+
+Reporter dispatch and recovery are unchanged. Every default-branch failure
+still dispatches the worker, and the incident stays open until the original
+checks pass. The worker does not infer an external cause from the share of
+failed matrix jobs. A single lagging mirror and a defect affecting one
+hostname can both fail exactly one job.
 
 [`agentic-maintenance.yml`](../../.github/workflows/agentic-maintenance.yml)
 uses the same worker for five weekly categories: updates, security, dead code,
@@ -168,6 +194,15 @@ publisher owns GitHub write credentials. Patches are bounded and cannot add
 credential paths, Git metadata, symlinks, or submodules. Proposed workflow
 changes do not replace the current run's separately prepared controller.
 The publisher rejects a stale target rather than overwriting a newer change.
+A review whose PR closed or merged during execution ends successfully with a
+`superseded` step summary before changing PR text, posting comments, or pushing
+commits. This applies to change, no-change, and blocked outcomes, including
+incident-linked reviews.
+For change outcomes, the publisher refreshes PR state after listing open PRs
+and before applying the patch, so closure during that lookup also supersedes
+the review.
+A review whose PR branch moved during the run ends without pushing or
+commenting; CodeRabbit's summary of the newer push starts its review.
 Rerunning a failed publisher reconciles the same task branch and PR. Rerunning
 preparation skips an issue with an existing owned open PR. That distinction
 matters when publication failed after creating the PR. An unconditional
@@ -208,13 +243,15 @@ checks passed.
 
 ## Subscription authentication and remaining trust
 
-Each worker run builds `neurodesktop-agentic:codex-0.162.1` from the trusted
+Each worker run builds `neurodesktop-agentic:codex-0.168.0` from the trusted
 [`config/agentic/Dockerfile`](../../config/agentic/Dockerfile), using Docker's
 layer cache. The controller's `stage` command assembles a narrow build context
 from that trusted checkout, including the JavaScript lint package manifest and
 lockfile. The preparation artifact carries these inputs separately from the
 candidate checkout. `WORKER_UID` and `WORKER_GID` build arguments create the runner's
-identity inside the image. The image pins Codex CLI `0.162.1`.
+identity inside the image. The image pins Codex CLI `0.168.0`.
+The build rejects a different installed CLI version. Renovate updates the
+installation pin and the matching version check together.
 
 The trusted image build also installs the unit-test workflow's Python, system,
 and pinned DOM dependencies, including JupyterHub, NIfTI support, and ACL tools.
@@ -237,7 +274,9 @@ The `canary` command validates a disposable unchanged clone through the same
 credential-free Docker path and frozen-suite runner used for candidates. It
 does not modify the caller's checkout or make a model request. Both the manual
 readiness workflow and the unit-test workflow build the staged worker and run
-this check. The required `pytest tests/unit` context gates both the
+this check. A failure writes the bounded report for artifact upload and emits
+the same report in the credential-free step log so workflow incidents retain
+the failing suite detail. The required `pytest tests/unit` context gates both the
 checkout unit job and the offline canary, so a failing canary blocks merge.
 The canary result applies to the tested source revision and worker image;
 a successful login-storage check alone does not establish test readiness.

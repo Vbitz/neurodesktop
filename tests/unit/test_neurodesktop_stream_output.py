@@ -145,6 +145,27 @@ def test_backspace_fragments_are_applied_to_the_shared_text():
     assert str(outputs[0]["text"]) == "aXY\n"
 
 
+def test_stream_state_names_fields_and_accepts_a_plain_tuple():
+    """Keep the helper compatible with callers that retain opaque tuples."""
+    module = load_module_with_fakes()
+    outputs = []
+
+    state = module.write_stream_output(
+        outputs, {"name": "stdout", "text": "abcdef"}
+    )
+    assert isinstance(state, tuple)
+    assert (state.text_length, state.cursor) == (6, 6)
+
+    # Earlier installed copies returned an unnamed tuple. Keep accepting that
+    # representation while returning the owned domain model from this copy.
+    state = module.write_stream_output(
+        outputs, {"name": "stdout", "text": "\rX"}, tuple(state)
+    )
+    assert isinstance(state, module.StreamState)
+    assert (state.text_length, state.cursor) == (6, 1)
+    assert str(outputs[0]["text"]) == "Xbcdef"
+
+
 def test_interleaved_stream_names_stay_separate_outputs():
     module = load_module_with_fakes()
     outputs = []
@@ -196,6 +217,28 @@ def test_end_of_stream_appends_avoid_materializing_the_text():
     )
     assert text.value == "line-1\nline-2\nline-3\nXartial\n"
     assert state[:2] == (29, 29)
+
+
+def test_append_transition_does_not_mutate_the_previous_state():
+    """StreamState snapshots must own their incremental hash state."""
+    module = load_module_with_fakes()
+    outputs = []
+
+    previous = module.write_stream_output(
+        outputs, {"name": "stdout", "text": "line-1\n"}
+    )
+    previous_digest = previous.running_hash.digest()
+
+    current = module.write_stream_output(
+        outputs, {"name": "stdout", "text": "line-2\n"}, previous
+    )
+
+    assert str(outputs[0]["text"]) == "line-1\nline-2\n"
+    assert current.running_hash is not previous.running_hash
+    assert previous.running_hash.digest() == previous_digest
+    assert current.running_hash.digest() == module._hasher(
+        "line-1\nline-2\n"
+    ).digest()
 
 
 def test_unknown_state_still_appends_without_reading_the_text():

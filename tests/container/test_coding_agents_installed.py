@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from testlib import run_cmd
+from testlib import run_cmd, run_cmd_streams
 
 
 WRAPPERS = {
@@ -38,6 +38,20 @@ def test_coding_agent_wrapper_is_installed_and_on_path(command, installed_path):
 
     code, output = run_cmd(f"command -v {command}")
     assert code == 0, f"{command} agent command missing from PATH: {output}"
+
+
+def test_codex_executable_reports_the_installed_package_version():
+    """Catch a stale or mismatched platform binary in the global npm package."""
+    code, npm_root = run_cmd("npm root -g")
+    assert code == 0, npm_root
+    package = json.loads(
+        (Path(npm_root) / "@openai/codex/package.json").read_text(encoding="utf-8")
+    )
+
+    code, output, diagnostics = run_cmd_streams("/usr/bin/codex --version")
+
+    assert code == 0, diagnostics or output
+    assert output == f"codex-cli {package['version']}", diagnostics
 
 
 @pytest.mark.parametrize("command,selector,image_cli,expected_argument", [

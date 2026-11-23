@@ -6,6 +6,10 @@ llm.neurodesk.org, then calls this helper to record the detected models in
 ``~/.config/opencode/opencode.json`` and, optionally, select a default model.
 
 Only the ``jetstream``, ``ollama`` and ``neurodesk`` providers are managed.
+They are written in OpenCode 2's ``providers`` layout. A managed entry in the
+1.x ``provider`` layout moves there when it holds nothing the move could lose;
+otherwise it is refreshed where it is. OpenCode 2 lets a ``providers`` entry
+replace a ``provider`` entry of the same name, so one never shadows the other.
 Other providers, MCP servers, user instructions, per-model customisations and
 extra provider options are preserved. Models a provider no longer lists are
 dropped. The config is replaced atomically and keeps its file mode; on any
@@ -55,6 +59,26 @@ DEFAULT_OLLAMA_HOST = "http://host.docker.internal:11434"
 OLLAMA_DISCOVERY_SECONDS = 6.0
 OLLAMA_DISCOVERY_CONTEXT_LIMIT = 32768
 OLLAMA_SNAPSHOT_ENV = "NEURODESKTOP_OPENCODE_OLLAMA_SNAPSHOT"
+
+
+@dataclass(frozen=True)
+class Layout:
+    """Where one OpenCode config generation keeps a provider's fields."""
+
+    block: str
+    package: str
+    settings: str
+
+
+LEGACY = Layout("provider", "npm", "options")
+CURRENT = Layout("providers", "package", "settings")
+OPENAI_COMPATIBLE_PACKAGE = "@ai-sdk/openai-compatible"
+# The legacy fields the image and this helper ever wrote. Anything else is a
+# user customisation whose OpenCode 2 spelling differs, so it stays in place.
+MOVABLE_FIELDS = {"npm", "name", "options", "models"}
+MOVABLE_OPTIONS = {"baseURL", "apiKey"}
+MOVABLE_MODEL_FIELDS = {"name", "limit"}
+MOVABLE_LIMITS = {"context", "output"}
 
 
 @dataclass(frozen=True)
@@ -195,66 +219,27 @@ def discover_ollama(
     return OllamaSnapshot(base_url, contexts)
 
 
-def ollama_is_managed(provider: JsonObject, base_url: str) -> bool:
-    options = _object(provider.get("options"))
-    managed_endpoints = {
+def managed_ollama_endpoints(base_url: str) -> list[str]:
+    """Endpoints that mark an Ollama provider as image-managed, not user-owned."""
+    endpoints = [
         ollama_base_url(DEFAULT_OLLAMA_HOST),
         "http://127.0.0.1:11434/v1",
         "http://localhost:11434/v1",
         base_url,
-    }
+    ]
+    return list(dict.fromkeys(endpoint for endpoint in endpoints if endpoint))
+
+
+def ollama_is_managed(provider: JsonObject, layout: Layout, base_url: str) -> bool:
+    settings = _object(provider.get(layout.settings))
     if provider.get(
-        "npm", "@ai-sdk/openai-compatible"
-    ) != "@ai-sdk/openai-compatible" or (
-        options.get("baseURL") and options["baseURL"] not in managed_endpoints
+        layout.package, OPENAI_COMPATIBLE_PACKAGE
+    ) != OPENAI_COMPATIBLE_PACKAGE or (
+        settings.get("baseURL")
+        and settings["baseURL"] not in managed_ollama_endpoints(base_url)
     ):
         return False
     return True
-
-
-def quiet_ollama_overlay(
-    snapshot: OllamaSnapshot, existing: JsonObject, defaults: JsonObject
-) -> JsonObject:
-    """Supply only missing Ollama data, keeping caller configuration in place."""
-    provider = _object(_object(existing.get("provider")).get("ollama"))
-    if not ollama_is_managed(provider, snapshot.base_url):
-        return {}
-    saved = _object(provider.get("models"))
-    seeds = _object(
-        _object(_object(defaults.get("provider")).get("ollama")).get("models")
-    )
-    models: JsonObject = {}
-    for name, context in snapshot.contexts.items():
-        current = _object(saved.get(name))
-        limits = _object(current.get("limit"))
-        if current == seeds.get(name):
-            limits = {}
-        context = positive_int(limits.get("context")) or context
-        output = min(
-            positive_int(limits.get("output")) or FALLBACK_OLLAMA_OUTPUT_LIMIT, context
-        )
-        models[name] = {"limit": {"context": context, "output": output}}
-        if "name" not in current:
-            models[name]["name"] = name
-    delta: JsonObject = {"models": models}
-    if not provider.get("npm"):
-        delta["npm"] = "@ai-sdk/openai-compatible"
-    if not provider.get("name"):
-        delta["name"] = "Local Ollama"
-    delta["options"] = {"baseURL": snapshot.base_url}
-    if "whitelist" not in provider:
-        # OpenCode deep-merges model maps. A whitelist hides the image's stale
-        # seed while retaining user models and explicit default selections.
-        visible = dict.fromkeys(snapshot.contexts)
-        visible.update(
-            {name: None for name, model in saved.items() if model != seeds.get(name)}
-        )
-        for key in ("model", "small_model"):
-            selected = existing.get(key)
-            if isinstance(selected, str) and selected.startswith("ollama/"):
-                visible[selected.removeprefix("ollama/")] = None
-        delta["whitelist"] = list(visible)
-    return {"provider": {"ollama": delta}}
 
 
 class ConfigError(Exception):
@@ -312,9 +297,9 @@ def builtin_provider(provider_key: str, models: DetectedModels) -> JsonObject:
     if provider_key == "neurodesk":
         options["apiKey"] = NEURODESK_API_KEY_REF
     return {
-        "npm": "@ai-sdk/openai-compatible",
+        "package": OPENAI_COMPATIBLE_PACKAGE,
         "name": names[provider_key],
-        "options": options,
+        "settings": options,
         "models": {},
     }
 
@@ -358,8 +343,69 @@ def _ollama_limits(
     return limit_cfg
 
 
+def _is_movable(legacy: JsonObject) -> bool:
+    options = legacy.get("options", {})
+    model_cfgs = legacy.get("models", {})
+    return (
+        set(legacy) <= MOVABLE_FIELDS
+        and isinstance(options, dict)
+        and set(options) <= MOVABLE_OPTIONS
+        and isinstance(model_cfgs, dict)
+        and all(
+            isinstance(model, dict)
+            and set(model) <= MOVABLE_MODEL_FIELDS
+            and isinstance(model.get("limit", {}), dict)
+            and set(model.get("limit", {})) <= MOVABLE_LIMITS
+            for model in model_cfgs.values()
+        )
+    )
+
+
+def _moved(legacy: JsonObject) -> JsonObject:
+    renamed = {"npm": "package", "options": "settings"}
+    return {
+        renamed.get(key, key): copy.deepcopy(value) for key, value in legacy.items()
+    }
+
+
+def _locate_provider(
+    cfg: JsonObject,
+    default_providers: JsonObject,
+    provider_key: str,
+    models: DetectedModels,
+) -> tuple[JsonObject, Layout]:
+    """The managed provider's entry, moved or seeded into ``providers``."""
+    providers = _object(cfg.get(CURRENT.block))
+    current = providers.get(provider_key)
+    if isinstance(current, dict):
+        return current, CURRENT
+    legacy_block = _object(cfg.get(LEGACY.block))
+    legacy = legacy_block.get(provider_key)
+    if isinstance(legacy, dict) and (
+        not _is_movable(legacy)
+        or provider_key == "ollama"
+        and not ollama_is_managed(legacy, LEGACY, models.base_urls["ollama"])
+    ):
+        return legacy, LEGACY
+    # A malformed legacy entry would still be parsed beside the new one.
+    legacy_block.pop(provider_key, None)
+    if legacy_block:
+        cfg[LEGACY.block] = legacy_block
+    else:
+        cfg.pop(LEGACY.block, None)
+    if isinstance(legacy, dict):
+        entry = _moved(legacy)
+    elif isinstance(default_providers.get(provider_key), dict):
+        entry = copy.deepcopy(default_providers[provider_key])
+    else:
+        entry = builtin_provider(provider_key, models)
+    providers[provider_key] = entry
+    cfg[CURRENT.block] = providers
+    return entry, CURRENT
+
+
 def _refresh_provider(
-    providers: JsonObject,
+    cfg: JsonObject,
     default_providers: JsonObject,
     provider_key: str,
     models: DetectedModels,
@@ -369,24 +415,19 @@ def _refresh_provider(
         for name in models.models.get(provider_key, [])
     ):
         return
-    provider_cfg = providers.get(provider_key)
-    if not isinstance(provider_cfg, dict):
-        default_provider = default_providers.get(provider_key)
-        if isinstance(default_provider, dict):
-            provider_cfg = copy.deepcopy(default_provider)
-        else:
-            provider_cfg = builtin_provider(provider_key, models)
-        providers[provider_key] = provider_cfg
+    provider_cfg, layout = _locate_provider(
+        cfg, default_providers, provider_key, models
+    )
 
     if provider_key == "ollama" and not ollama_is_managed(
-        provider_cfg, models.base_urls["ollama"]
+        provider_cfg, layout, models.base_urls["ollama"]
     ):
         return
 
-    options = provider_cfg.get("options")
+    options = provider_cfg.get(layout.settings)
     if not isinstance(options, dict):
         options = {}
-        provider_cfg["options"] = options
+        provider_cfg[layout.settings] = options
     options["baseURL"] = models.base_urls[provider_key]
     if provider_key == "neurodesk":
         provider_cfg["name"] = NEURODESK_PROVIDER_NAME
@@ -413,12 +454,20 @@ def _refresh_provider(
     provider_cfg["models"] = updated_models
 
 
-def _model_exists(providers: JsonObject, model_ref: object) -> bool:
+def _provider_models(cfg: JsonObject, provider_key: str) -> JsonObject:
+    """The models OpenCode 2 sees, where ``providers`` replaces ``provider``."""
+    for block in (CURRENT.block, LEGACY.block):
+        entry = _object(cfg.get(block)).get(provider_key)
+        if isinstance(entry, dict):
+            return _object(entry.get("models"))
+    return {}
+
+
+def _model_exists(cfg: JsonObject, model_ref: object) -> bool:
     if not isinstance(model_ref, str) or "/" not in model_ref:
         return False
     provider_key, model_id = model_ref.split("/", 1)
-    models_cfg = _object(providers.get(provider_key)).get("models")
-    return isinstance(models_cfg, dict) and model_id in models_cfg
+    return model_id in _provider_models(cfg, provider_key)
 
 
 def update_config(
@@ -436,17 +485,15 @@ def update_config(
     cfg = copy.deepcopy(cfg)
     drop_legacy_global_instruction(cfg)
 
-    providers = _object(cfg.get("provider"))
-    default_providers = _object(default_cfg.get("provider"))
+    default_providers = _object(default_cfg.get(CURRENT.block))
     for provider_key in models.models:
-        _refresh_provider(providers, default_providers, provider_key, models)
-    cfg["provider"] = providers
+        _refresh_provider(cfg, default_providers, provider_key, models)
 
-    if selected_model and _model_exists(providers, selected_model):
+    if selected_model and _model_exists(cfg, selected_model):
         cfg["model"] = selected_model
     elif not isinstance(cfg.get("model"), str) or not cfg["model"]:
         for provider_key in MANAGED_PROVIDERS:
-            models_cfg = _object(_object(providers.get(provider_key)).get("models"))
+            models_cfg = _provider_models(cfg, provider_key)
             if models_cfg:
                 cfg["model"] = f"{provider_key}/{next(iter(models_cfg))}"
                 break
@@ -537,7 +584,8 @@ def exec_quiet_opencode(binary: str, defaults_path: Path, argv: list[str]) -> No
                 {
                     "base_url": snapshot.base_url,
                     "contexts": snapshot.contexts,
-                    "defaults": str(defaults_path),
+                    "managed": managed_ollama_endpoints(snapshot.base_url),
+                    "seeds": image_ollama_seeds(defaults_path),
                 }
             )
             if len(content.encode()) <= 65536:
@@ -545,25 +593,19 @@ def exec_quiet_opencode(binary: str, defaults_path: Path, argv: list[str]) -> No
     os.execv(binary, [binary, *argv])
 
 
-def quiet_overlay_from_stdin() -> JsonObject:
+def image_ollama_seeds(defaults_path: Path) -> JsonObject:
+    """The image's seed Ollama models, which the plugin hides when stale."""
     try:
-        observation = json.loads(os.environ[OLLAMA_SNAPSHOT_ENV])
-        snapshot = OllamaSnapshot(observation["base_url"], observation["contexts"])
-        defaults_path = Path(observation["defaults"])
         defaults = load_json_object(defaults_path) if defaults_path.exists() else {}
-        existing = json.load(sys.stdin)
-        return quiet_ollama_overlay(snapshot, existing, defaults)
-    except (ConfigError, OSError, ValueError, TypeError, KeyError):
+    except ConfigError:
         return {}
+    return _provider_models(defaults, "ollama")
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] == "--quiet-exec":
         exec_quiet_opencode(argv[1], Path(argv[2]), argv[3:])
-        return 0
-    if argv == ["--quiet-overlay"]:
-        print(json.dumps(quiet_overlay_from_stdin()))
         return 0
     if argv == ["--discover-ollama"]:
         snapshot = discover_ollama(os.environ.get("OLLAMA_HOST") or DEFAULT_OLLAMA_HOST)

@@ -5,7 +5,7 @@ description: Image build steps with non-obvious behavior — the Notebook
   stage, and user permissions
 parent: ../architecture.md
 status: current
-last-reviewed: "2026-10-20"
+last-reviewed: "2026-11-19"
 ---
 
 # Build-Time Behaviors
@@ -23,17 +23,31 @@ candidates for a specific run and attempt, test and scan them, and then promote
 the same candidates to release tags. Native runtime checks cover both image
 architectures. A date tag never substitutes for building the run's source SHA.
 
+Image scan jobs install Trivy 0.70.0 directly from its GitHub release using
+[the shared installer](../../.github/scripts/install_trivy.sh). The installer
+selects the native architecture, retries downloads, and verifies the release
+checksum before installing. Scan and SBOM actions reuse that binary rather
+than downloading it through `get.trivy.dev`.
+
 The shared [Trivy policy](../../.trivyignore.yaml) records individual scan
-exceptions. [Issues #1142](https://github.com/neurodesk/neurodesktop/issues/1142)
-and [#1152](https://github.com/neurodesk/neurodesktop/issues/1152) identified
-twelve kernel CVEs reported against Ubuntu 26.04's
-`linux-libc-dev` 7.0.0-38.38. That package contains UAPI headers without the
-affected kernel implementation. CVMFS requires it through `uuid-dev` and
-`libc6-dev`; removing the headers breaks that dependency chain. Containers use
-the host kernel, whose security updates remain the host administrator's responsibility.
-These twelve exceptions match only the assessed Ubuntu package and version,
-on either architecture, and expire on 2026-11-20 for reassessment. Other
-package versions, kernel packages, and CVEs remain subject to the scan gate.
+exceptions. It currently excepts CVE-2026-99287, CVE-2026-99306 and
+CVE-2026-99310 in `linux-libc-dev` 7.0.0-43.43 and 7.0.0-44.44 until
+2027-01-19, because Ubuntu had not yet published fixed headers when they
+appeared on 2026-11-19, nor when it released 7.0.0-44.44 without the fixes. An exception must name the exact affected
+packages as package URLs, carry an `expired_at` date at most 90 days ahead, and
+state why the finding is not exploitable in this image. Other package versions
+and CVEs remain subject to the scan gate.
+
+`linux-libc-dev` stays installed because the CVMFS package depends on
+`uuid-dev`, which pulls in `libc6-dev` and the kernel UAPI headers. Trivy
+reports kernel CVEs against that header package until Ubuntu publishes a
+header version built from the fixed kernel source, although containers run the
+host kernel. If a new CRITICAL kernel finding appears against it, check the
+[Ubuntu CVE tracker](https://ubuntu.com/security/cves) for the fixed `linux`
+version before adding a time-bounded exception; a rebuild picks up the fixed
+headers once they reach `resolute-security`. The removed exceptions are
+recorded in the
+[2026-11-16 reassessment](../designs/trivy-exception-reassessment-2026-11-16.md).
 
 ## Base image dependencies
 
@@ -42,6 +56,11 @@ the matching FreeRDP 3 client libraries. Its build selects GNU C17 because
 [GCC 15 defaults to C23](https://gcc.gnu.org/gcc-15/porting_to.html).
 It accepts deprecated FreeRDP API declarations and requires the RDP plugin
 to exist after installation.
+
+The Guacamole source download tries Apache's current-release server first and
+falls back to its archive for releases removed from the current directory or
+when that server is unavailable. Each endpoint retains bounded retries; failure
+of both stops the build before extraction.
 
 The build backports [GUACAMOLE-2328](https://issues.apache.org/jira/browse/GUACAMOLE-2328)
 from upstream commit
@@ -52,6 +71,18 @@ after FreeRDP creates the connection cache. This prevents the RDP worker crash
 with FreeRDP 3.31 and later. The 1.6.0 backport preserves its existing RAIL and
 static-channel loading in PreConnect. The installed RDP test requires desktop
 pixels and a command executed through the authenticated Guacamole tunnel.
+
+It also backports [GUACAMOLE-2270](https://issues.apache.org/jira/browse/GUACAMOLE-2270)
+from upstream commit
+[`6f4b4516350605f7a3135ef7db18b367d4188ae9`](https://github.com/apache/guacamole-server/commit/6f4b4516350605f7a3135ef7db18b367d4188ae9),
+which upstream merged for 1.6.1. In 1.6.0, `guac_display_dup()` holds the
+last-frame lock and the render-state flag while it takes the pending-frame lock,
+the reverse of the frame flush order. A user who joins while a frame is
+rendering can deadlock the connection's display: guacd never syncs that user,
+and Tomcat closes the tunnel after 15 seconds with "Connection to guacd timed
+out". The hash-checked [patch](../../config/guacamole/guacamole-1.6.0-GUACAMOLE-2270.patch)
+reads the layer size from the last frame instead. Remove both backports when
+the image moves to a Guacamole release that contains them.
 
 The generated Guacamole header drops its fixed `_XOPEN_SOURCE` definition;
 its `_GNU_SOURCE` definition lets libc choose the matching feature level.
@@ -98,12 +129,19 @@ It validates all six files before writing and fails if their example counts
 change or the literal appears in executable code. SDK request construction,
 user credentials, and scanner rules remain unchanged.
 
-The main Python environment pins `pip` 26.2.2, `certifi` 2026.10.19, and
-`uv` 0.13.4. Their fixed releases remove the compromised emSign G3 trust
-paths. Updating the main `certifi` distribution does not update pip's vendored
-copy, so pip is upgraded before installing the other Python packages.
-The installed-image test inspects both certifi bundles. The pins remain under
-the direct-version audit and Renovate tracking.
+The main Python environment pins `pip` 26.2.2, `certifi` 2026.10.23, and
+`uv` 0.13.8. Their fixed releases remove the compromised emSign G3 trust
+paths. uv 0.13.8 also creates its default plaintext credential directory,
+credential file, and lock with owner-only permissions instead of inheriting a
+permissive process umask. Updating the main `certifi` distribution does not
+update pip's vendored copy, so pip is upgraded before installing the other
+Python packages.
+The installed-image test inspects both certifi bundles. The environment also
+pins Brotli 1.2.1 so malformed compressed input cannot reach the decoder
+out-of-bounds write in 1.2.0 (CVE-2026-111497). The build reads these
+security-sensitive packages back from installed metadata, and the image test
+exercises Brotli compression and decompression. The pins remain under the
+direct-version audit and Renovate tracking.
 
 The runtime stage is ordered by how often each layer's inputs change, because
 invalidating a layer re-runs every layer after it. Three bands, in order:
@@ -127,6 +165,13 @@ all of `tests/` was mounted) would needlessly rebuild everything downstream.
 When adding a layer, mount individual files and place the layer at the
 band matching its most volatile input.
 
+The TinyTeX layer refreshes `tlmgr` before requesting supplemental packages
+from the live TeX repository. The daily TinyTeX bundle and repository are
+published independently, and the repository can require a newer manager before
+it will process package installs. Both manager refresh and package installation
+use the image's retry wrapper; the installed-image PDF export test exercises the
+resulting toolchain.
+
 The runtime stage starts from the pinned multi-architecture
 `jupyter/base-notebook` date tag and runs an apt `dist-upgrade` against fresh
 Ubuntu metadata before installing Neurodesktop's runtime packages. The pip
@@ -134,7 +179,24 @@ layer upgrades every direct requested distribution while retaining explicit
 compatibility holds. Resolver-selected dependencies inherit the new base and
 fresh direct solves; the build does not run an unbounded post-solve pip or
 conda upgrade that could replace the base image's tested Jupyter environment.
-Snakemake 9.27.0 has an isolated tool environment because its `packaging<26`
+The image explicitly uses Conda's supported `libmamba` solver. The pinned base
+currently also supplies the opt-in `conda-rattler-solver` 0.2.0 and
+`py-rattler` 0.26.0, whose native extension embeds the vulnerable Rust `zip`
+8.6.0 crate (CVE-2026-115905). The released solver cannot use the fixed
+`py-rattler` 0.28.0 line, so the build removes both unused Rattler packages and
+disallows only `py-rattler <0.28.0`; it then starts Conda to verify that
+`libmamba` remains selected. Remove this mitigation only after the base
+image carries a released compatible solver and an installed-image scan confirms
+that its `zip` crate is 9.0.5 or newer.
+The `2026-10-28` base ships libmamba 2.10.0, which aborts with
+`std::bad_alloc` when it reads any `file://` channel, including an empty one.
+Conda's `conda-forge` solves still work. The conda layer installs the 2.9.0
+`libmamba`, `libmambapy` and `mamba` builds and disallows exactly
+`libmamba ==2.10.0` and `libmambapy ==2.10.0`, so a later update cannot restore
+the broken release but can install a fixed one. Drop the pins once a
+base image ships a libmamba release that passes the local-channel installed
+image check.
+Snakemake 9.27.1 has an isolated tool environment because its `packaging<26`
 requirement conflicts with the base image's Conda requirement of
 `packaging>=26.3`. Its private environment uses `packaging` 25.0 and exposes the
 normal `snakemake` command through `/usr/local/bin`. The main environment
@@ -152,7 +214,7 @@ declared builder range against the image's builder pin before producing the
 wheel; the previous package-rename workaround is no longer needed.
 
 Both Jupyter source builds use [build constraints](../../config/jupyter/build-constraints.txt)
-for the isolated Python build environment. The toolchain pins Hatchling 1.32.4
+for the isolated Python build environment. The toolchain pins Hatchling 1.33.0
 and hatch-jupyter-builder 0.10.0. The launcher also declares that pair in its
 own build metadata. Use pip's `--build-constraint`, not `-c`: ordinary runtime
 constraints do not constrain isolated build dependencies. Changes to these
@@ -248,10 +310,10 @@ build when a `notebook_intelligence` upgrade changes it, so the workarounds
 cannot silently regress; re-verify and update (or drop) them when bumping
 the pin.
 
-Notebook Intelligence 6.2.0's published frontend accepts the image's JupyterLab
+Notebook Intelligence 6.3.0's published frontend accepts the image's JupyterLab
 4.6 launcher. The image uses that bundle directly and checks that a
-`remoteEntry` exists before applying the patches. The settings patch preserves
-the optional tab selection after refreshing capabilities. The Ollama patch
+`remoteEntry` exists before applying the patches. The settings patch accepts the translated command label introduced in
+6.3.0 and preserves the optional tab selection after refreshing capabilities. The Ollama patch
 matches the lookup's exact nesting inside the provider's bounded client.
 The obsolete 5.3.1 source rebuild and its Yarn lockfile are removed.
 

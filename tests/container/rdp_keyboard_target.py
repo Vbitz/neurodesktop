@@ -11,6 +11,7 @@ import time
 import websocket
 
 from native_desktop_driver import _WindowAttributes
+from testlib import GuacamoleInstructions, guacamole_instruction
 
 
 def _xrdp_sessions(uid):
@@ -49,6 +50,7 @@ class RdpKeyboardTarget:
         self.uid = uid
         self.previous_sessions = _xrdp_sessions(uid)
         self.session = None
+        self.instructions = GuacamoleInstructions()
 
     def snapshot(self, timeout_seconds):
         sessions = _xrdp_sessions(self.uid)
@@ -73,14 +75,20 @@ class RdpKeyboardTarget:
         assert probe.returncode == 0, f'X11 observation failed on {display}: {probe.stderr}'
         return {'display': display, 'pid': pid, **json.loads(probe.stdout)}
 
-    def wait(self, tunnel, *, run_dialog=False, timeout_seconds=30):
+    def wait(self, tunnel, *, run_dialog=False, timeout_seconds=30, trigger=None):
         expected = 'focused Run dialog' if run_dialog else 'desktop hotkey target'
         field = 'run_focused' if run_dialog else 'hotkey_ready'
         deadline = time.monotonic() + timeout_seconds
+        next_trigger = time.monotonic()
         state = {'waiting': 'first X11 observation'}
+        observation_timeouts = []
         previous_timeout = tunnel.gettimeout()
         try:
             while (remaining := deadline - time.monotonic()) > 0:
+                now = time.monotonic()
+                if trigger is not None and now >= next_trigger:
+                    trigger()
+                    next_trigger = now + 1
                 tunnel.settimeout(min(0.1, remaining))
                 try:
                     frame = tunnel.recv()
@@ -90,21 +98,36 @@ class RdpKeyboardTarget:
                     raise AssertionError(f'Guacamole transport failed waiting for {expected}; {state}') from error
                 else:
                     assert frame, f'Guacamole tunnel closed waiting for {expected}; {state}'
-                    assert not isinstance(frame, str) or '.error,' not in frame, (
-                        f'Guacamole error waiting for {expected}: {frame!r}; {state}'
-                    )
+                    if isinstance(frame, str):
+                        instructions = self.instructions.feed(frame)
+                        error = next((item for item in instructions if item[0] == 'error'), None)
+                        assert error is None, f'Guacamole error waiting for {expected}: {error!r}; {state}'
+                        for instruction in instructions:
+                            if instruction[0] == 'sync':
+                                tunnel.send(guacamole_instruction(*instruction))
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 try:
                     state = self.snapshot(min(2, remaining))
                 except subprocess.TimeoutExpired as error:
-                    raise AssertionError(f'X11 observation timed out waiting for {expected}; {state}') from error
+                    # A probe is only one readiness sample. Keep the tunnel
+                    # alive and let the caller's overall deadline decide.
+                    observation_timeouts.append(error.timeout)
+                    continue
                 if state.get(field) and time.monotonic() < deadline:
                     return state
         finally:
             tunnel.settimeout(previous_timeout)
-        raise AssertionError(f'No {expected} within {timeout_seconds}s; last X11 state: {state}')
+        timeout_note = ''
+        if observation_timeouts:
+            timeout_note = (
+                f'; {len(observation_timeouts)} X11 observation(s) timed out, '
+                f'last after {observation_timeouts[-1]}s'
+            )
+        raise AssertionError(
+            f'No {expected} within {timeout_seconds}s; last X11 state: {state}{timeout_note}'
+        )
 
 
 def _snapshot(display):
