@@ -20,26 +20,82 @@ def wait_for(bidi, context, expression):
 
 
 def click(bidi, context, expression):
-    point = json.loads(
-        evaluate(
-            bidi,
-            context,
-            """JSON.stringify((() => {
-        const node = """
-            + expression
-            + """;
-        node.scrollIntoView({block:'center'});
-        const r = node.getBoundingClientRect();
-        return {x:Math.round(r.left+Math.min(r.width/2,20)),y:Math.round(r.top+r.height/2)};
-    })())""",
-        )
-    )
-    assert evaluate(
-        bidi,
-        context,
-        f"Boolean(({expression}).contains(document.elementFromPoint({point['x']},{point['y']})))",
-    ), point
-    actions = [{"type": "pointerMove", "duration": 0, "origin": "viewport", **point}]
+    target = bidi.request("script.evaluate", {
+        "expression": """(async () => {
+            const deadline = performance.now() + 20000;
+            let previous = null;
+            let stableFrames = 0;
+            globalThis.__neurodesktopAstraClickOffset = null;
+            while (performance.now() < deadline) {
+                await new Promise(requestAnimationFrame);
+                const node = """ + expression + """;
+                if (!node?.checkVisibility()) {
+                    previous = null;
+                    stableFrames = 0;
+                    continue;
+                }
+                node.scrollIntoView({block: 'center', behavior: 'instant'});
+                const rect = node.getBoundingClientRect();
+                const clientRects = Array.from(node.getClientRects());
+                if (!clientRects.length) {
+                    previous = null;
+                    stableFrames = 0;
+                    continue;
+                }
+                const originRect = clientRects[0];
+                const left = Math.max(0, Math.min(originRect.left, innerWidth));
+                const right = Math.max(0, Math.min(originRect.right, innerWidth));
+                const top = Math.max(0, Math.min(originRect.top, innerHeight));
+                const bottom = Math.max(0, Math.min(originRect.bottom, innerHeight));
+                const originX = Math.floor((left + right) / 2);
+                const originY = Math.floor((top + bottom) / 2);
+                const fractions = [
+                    [0.5, 0.5], [0.2, 0.2], [0.8, 0.2], [0.2, 0.8],
+                    [0.8, 0.8], [0.2, 0.5], [0.8, 0.5], [0.5, 0.2],
+                    [0.5, 0.8],
+                ];
+                let offset = null;
+                for (const clientRect of clientRects) {
+                    const clientLeft = Math.max(0, clientRect.left);
+                    const clientRight = Math.min(innerWidth, clientRect.right);
+                    const clientTop = Math.max(0, clientRect.top);
+                    const clientBottom = Math.min(innerHeight, clientRect.bottom);
+                    if (clientRight <= clientLeft || clientBottom <= clientTop) continue;
+                    for (const [xFraction, yFraction] of fractions) {
+                        const x = Math.round(
+                            clientLeft + (clientRight - clientLeft) * xFraction);
+                        const y = Math.round(
+                            clientTop + (clientBottom - clientTop) * yFraction);
+                        if (node.contains(document.elementFromPoint(x, y))) {
+                            offset = {x: x - originX, y: y - originY};
+                            break;
+                        }
+                    }
+                    if (offset) break;
+                }
+                const geometry = offset && JSON.stringify([
+                    rect.x, rect.y, rect.width, rect.height, offset.x, offset.y,
+                ]);
+                stableFrames = geometry && geometry === previous
+                    ? stableFrames + 1 : 0;
+                if (stableFrames >= 2) {
+                    globalThis.__neurodesktopAstraClickOffset = offset;
+                    return node;
+                }
+                previous = geometry;
+            }
+            throw new Error('ASTRA click target did not become stable and unobscured');
+        })()""",
+        "target": {"context": context}, "awaitPromise": True,
+    })
+    assert target["type"] == "success", target.get("exceptionDetails", {}).get("text", target)
+    origin = {"type": "element", "element": {"sharedId": target["result"]["sharedId"]}}
+    offset_x = evaluate(bidi, context, "globalThis.__neurodesktopAstraClickOffset.x")
+    offset_y = evaluate(bidi, context, "globalThis.__neurodesktopAstraClickOffset.y")
+    actions = [{
+        "type": "pointerMove", "duration": 0, "origin": origin,
+        "x": offset_x, "y": offset_y,
+    }]
     actions += [
         {"type": "pointerDown", "button": 0},
         {"type": "pointerUp", "button": 0},

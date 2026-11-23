@@ -1,161 +1,40 @@
+# Reviewed image-scan exceptions.
+#
+# Any exception added here must name the exact affected packages in `purls`,
+# carry an `expired_at` reassessment date, and explain in `statement` why the
+# finding is not exploitable in this image.
+#
+# The kernel CVEs below are reported against linux-libc-dev, the UAPI header
+# package that CVMFS pulls in through uuid-dev. On 2026-11-19, and again on
+# 2026-11-21 after Ubuntu published headers 7.0.0-44.44, the Ubuntu CVE tracker
+# listed each as "needed" for linux in Ubuntu 26.04, so no fixed header package
+# exists yet. Remove each entry once a rebuild installs the
+# fixed headers; the exception stops matching as soon as the version changes.
 vulnerabilities:
-  - id: CVE-2026-56854
-    statement: >-
-      Trivy finds golang.org/x/crypto/ssh in the Apptainer and bundled
-      gocryptfs binaries, but the vulnerable code path is the SSH server-only
-      NewServerConn authentication callback. Neither binary implements an SSH
-      server or calls NewServerConn, so the source-address authentication
-      bypass is not reachable. Remove this ignore if either binary gains an
-      SSH server.
-  - id: CVE-2026-53215
-    statement: >-
-      linux-libc-dev is retained only because the CERN CVMFS runtime package
-      depends on uuid-dev/libc headers on Ubuntu 26.04. The vulnerable kernel
-      code is not the running kernel in this container. Remove this ignore when
-      Ubuntu publishes a fixed linux-libc-dev package or CVMFS drops this
-      dependency chain.
-  - id: CVE-2026-53398
-    statement: >-
-      linux-libc-dev is retained only because the CERN CVMFS runtime package
-      depends on uuid-dev/libc headers on Ubuntu 26.04. The vulnerable kernel
-      code is not the running kernel in this container. Remove this ignore when
-      Ubuntu publishes a fixed linux-libc-dev package or CVMFS drops this
-      dependency chain.
-  - id: CVE-2026-63940
-    statement: >-
-      linux-libc-dev is retained only because the CERN CVMFS runtime package
-      depends on uuid-dev/libc headers on Ubuntu 26.04. The vulnerable kernel
-      code is not the running kernel in this container. Remove this ignore when
-      Ubuntu publishes a fixed linux-libc-dev package or CVMFS drops this
-      dependency chain.
-  - id: CVE-2026-64535
-    statement: >-
-      linux-libc-dev is retained only because the CERN CVMFS runtime package
-      depends on uuid-dev/libc headers on Ubuntu 26.04. The vulnerable kernel
-      code is not the running kernel in this container. Remove this ignore when
-      Ubuntu publishes a fixed linux-libc-dev package or CVMFS drops this
-      dependency chain.
-  - id: CVE-2026-64564
-    statement: >-
-      linux-libc-dev is retained only because the CERN CVMFS runtime package
-      depends on uuid-dev/libc headers on Ubuntu 26.04. The vulnerable kernel
-      code is not the running kernel in this container. Remove this ignore when
-      Ubuntu publishes a fixed linux-libc-dev package or CVMFS drops this
-      dependency chain.
-  - id: CVE-2026-74394
-    statement: >-
-      linux-libc-dev is retained only because the CERN CVMFS runtime package
-      depends on uuid-dev/libc headers on Ubuntu 26.04. The vulnerable kernel
-      code is not the running kernel in this container. Remove this ignore when
-      Ubuntu publishes a fixed linux-libc-dev package or CVMFS drops this
-      dependency chain.
-  # Both architectures in Build neurodesktop run 39464164441 reported these
-  # kernel-source findings against the UAPI header package. Reassess by expiry.
-  - id: CVE-2026-89530
+  - id: CVE-2026-99287
     purls:
-      - pkg:deb/ubuntu/linux-libc-dev@7.0.0-38.38
-    expired_at: 2026-11-20
+      - pkg:deb/ubuntu/linux-libc-dev@7.0.0-43.43
+      - pkg:deb/ubuntu/linux-libc-dev@7.0.0-44.44
+    expired_at: 2027-01-19
     statement: >-
-      linux-libc-dev contains UAPI headers, without the affected kernel
-      implementation. CVMFS requires it through uuid-dev and libc6-dev on
-      Ubuntu 26.04. Containers use the host kernel, which needs separate
-      security updates. This exception covers only the assessed header version.
-  - id: CVE-2026-89652
+      Denial of service in the kernel xen-netback driver. linux-libc-dev only
+      installs kernel headers; containers run the host kernel, so the image
+      ships none of the affected driver code.
+  - id: CVE-2026-99306
     purls:
-      - pkg:deb/ubuntu/linux-libc-dev@7.0.0-38.38
-    expired_at: 2026-11-20
+      - pkg:deb/ubuntu/linux-libc-dev@7.0.0-43.43
+      - pkg:deb/ubuntu/linux-libc-dev@7.0.0-44.44
+    expired_at: 2027-01-19
     statement: >-
-      linux-libc-dev contains UAPI headers, without the affected kernel
-      implementation. CVMFS requires it through uuid-dev and libc6-dev on
-      Ubuntu 26.04. Containers use the host kernel, which needs separate
-      security updates. This exception covers only the assessed header version.
-  - id: CVE-2026-89659
+      Out-of-bounds access in the kernel ceph client while decoding an MDS map.
+      linux-libc-dev only installs kernel headers; containers run the host
+      kernel, so the image ships none of the affected client code.
+  - id: CVE-2026-99310
     purls:
-      - pkg:deb/ubuntu/linux-libc-dev@7.0.0-38.38
-    expired_at: 2026-11-20
+      - pkg:deb/ubuntu/linux-libc-dev@7.0.0-43.43
+      - pkg:deb/ubuntu/linux-libc-dev@7.0.0-44.44
+    expired_at: 2027-01-19
     statement: >-
-      linux-libc-dev contains UAPI headers, without the affected kernel
-      implementation. CVMFS requires it through uuid-dev and libc6-dev on
-      Ubuntu 26.04. Containers use the host kernel, which needs separate
-      security updates. This exception covers only the assessed header version.
-  - id: CVE-2026-89708
-    purls:
-      - pkg:deb/ubuntu/linux-libc-dev@7.0.0-38.38
-    expired_at: 2026-11-20
-    statement: >-
-      linux-libc-dev contains UAPI headers, without the affected kernel
-      implementation. CVMFS requires it through uuid-dev and libc6-dev on
-      Ubuntu 26.04. Containers use the host kernel, which needs separate
-      security updates. This exception covers only the assessed header version.
-  - id: CVE-2026-90037
-    purls:
-      - pkg:deb/ubuntu/linux-libc-dev@7.0.0-38.38
-    expired_at: 2026-11-20
-    statement: >-
-      linux-libc-dev contains UAPI headers, without the affected kernel
-      implementation. CVMFS requires it through uuid-dev and libc6-dev on
-      Ubuntu 26.04. Containers use the host kernel, which needs separate
-      security updates. This exception covers only the assessed header version.
-  - id: CVE-2026-90162
-    purls:
-      - pkg:deb/ubuntu/linux-libc-dev@7.0.0-38.38
-    expired_at: 2026-11-20
-    statement: >-
-      linux-libc-dev contains UAPI headers, without the affected kernel
-      implementation. CVMFS requires it through uuid-dev and libc6-dev on
-      Ubuntu 26.04. Containers use the host kernel, which needs separate
-      security updates. This exception covers only the assessed header version.
-  - id: CVE-2026-93221
-    purls:
-      - pkg:deb/ubuntu/linux-libc-dev@7.0.0-38.38
-    expired_at: 2026-11-20
-    statement: >-
-      linux-libc-dev contains UAPI headers, without the affected kernel
-      implementation. CVMFS requires it through uuid-dev and libc6-dev on
-      Ubuntu 26.04. Containers use the host kernel, which needs separate
-      security updates. This exception covers only the assessed header version.
-  - id: CVE-2026-98365
-    purls:
-      - pkg:deb/ubuntu/linux-libc-dev@7.0.0-38.38
-    expired_at: 2026-11-20
-    statement: >-
-      linux-libc-dev contains UAPI headers, without the affected kernel
-      implementation. CVMFS requires it through uuid-dev and libc6-dev on
-      Ubuntu 26.04. Containers use the host kernel, which needs separate
-      security updates. This exception covers only the assessed header version.
-  - id: CVE-2026-98571
-    purls:
-      - pkg:deb/ubuntu/linux-libc-dev@7.0.0-38.38
-    expired_at: 2026-11-20
-    statement: >-
-      linux-libc-dev contains UAPI headers, without the affected kernel
-      implementation. CVMFS requires it through uuid-dev and libc6-dev on
-      Ubuntu 26.04. Containers use the host kernel, which needs separate
-      security updates. This exception covers only the assessed header version.
-  - id: CVE-2026-98621
-    purls:
-      - pkg:deb/ubuntu/linux-libc-dev@7.0.0-38.38
-    expired_at: 2026-11-20
-    statement: >-
-      linux-libc-dev contains UAPI headers, without the affected kernel
-      implementation. CVMFS requires it through uuid-dev and libc6-dev on
-      Ubuntu 26.04. Containers use the host kernel, which needs separate
-      security updates. This exception covers only the assessed header version.
-  - id: CVE-2026-98725
-    purls:
-      - pkg:deb/ubuntu/linux-libc-dev@7.0.0-38.38
-    expired_at: 2026-11-20
-    statement: >-
-      linux-libc-dev contains UAPI headers, without the affected kernel
-      implementation. CVMFS requires it through uuid-dev and libc6-dev on
-      Ubuntu 26.04. Containers use the host kernel, which needs separate
-      security updates. This exception covers only the assessed header version.
-  - id: CVE-2026-98805
-    purls:
-      - pkg:deb/ubuntu/linux-libc-dev@7.0.0-38.38
-    expired_at: 2026-11-20
-    statement: >-
-      linux-libc-dev contains UAPI headers, without the affected kernel
-      implementation. CVMFS requires it through uuid-dev and libc6-dev on
-      Ubuntu 26.04. Containers use the host kernel, which needs separate
-      security updates. This exception covers only the assessed header version.
+      Use-after-free in the kernel NFS server. linux-libc-dev only installs
+      kernel headers; containers run the host kernel, so the image ships none
+      of the affected server code.

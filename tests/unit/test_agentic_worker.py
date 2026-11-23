@@ -393,6 +393,31 @@ def test_publish_refuses_stale_review(worker, proposal, publisher_api, monkeypat
         worker.publish(task, output, repo)
 
 
+@pytest.mark.parametrize("kind", ["review", "issue"])
+def test_branch_moved_during_run_skips_review_but_refuses_issue(worker, proposal, publisher_api, monkeypatch, tmp_path, kind):
+    task, output, repo, remote = proposal
+    task["kind"] = kind
+    worker.git("checkout", "-b", task["branch"], cwd=repo)
+    (repo / "file.txt").write_text("Human changes\n")
+    worker.git("commit", "-am", "Human revision", cwd=repo)
+    worker.git("push", "origin", task["branch"], cwd=repo)
+    worker.git("checkout", "main", cwd=repo)
+    human = worker.git("rev-parse", task["branch"], cwd=remote)
+    calls, _, original_api = publisher_api
+    monkeypatch.setattr(worker, "api", lambda path, payload=None: (
+        pull(number=42) if path == "repos/owner/repo/pulls/42" else original_api(path, payload)))
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    if kind == "review":
+        assert worker.publish(task, output, repo) is None
+        assert f"superseded: PR branch moved past `{task['base_sha']}`" in summary.read_text()
+    else:
+        with pytest.raises(ValueError, match="Branch changed during publication"):
+            worker.publish(task, output, repo)
+    assert worker.git("rev-parse", task["branch"], cwd=remote) == human
+    assert not [path for path, _ in calls if path.endswith("/comments") or path.endswith("/pulls")]
+
+
 @pytest.mark.parametrize("auth_data", [
     {"auth_mode": "apikey", "OPENAI_API_KEY": "key"},
     {"auth_mode": "chatgpt", "tokens": {}},
@@ -965,9 +990,12 @@ def test_review_deduplicates_completed_head_by_trusted_marker(worker, github, tm
 
 
 @pytest.mark.parametrize("outcome", ["no_change", "blocked"])
-def test_review_without_patch_records_head_once(worker, proposal, publisher_api, outcome):
+def test_review_without_patch_records_head_once(worker, proposal, publisher_api, monkeypatch, outcome):
     task, output, repo, _ = proposal
     task["kind"] = "review"
+    original_api = publisher_api[2]
+    monkeypatch.setattr(worker, "api", lambda path, payload=None: (
+        pull(number=42) if path == "repos/owner/repo/pulls/42" else original_api(path, payload)))
     worker.write_json(output / "result.json", valid_result(outcome=outcome))
     worker.publish(task, output, repo)
     worker.publish({**task, "run_id": "101"}, output, repo)
@@ -1112,7 +1140,9 @@ def test_candidate_outer_timeout_reports_incomplete_validation(worker, candidate
     subprocess.TimeoutExpired("docker", 1800, output="canary partial output"),
     subprocess.CalledProcessError(1, "unused"),
 ])
-def test_canary_persists_validator_failure_without_candidate_artifacts(worker, candidate, failure):
+def test_canary_persists_and_reports_validator_failure_without_candidate_artifacts(
+    worker, candidate, failure, capsys,
+):
     state, repo, control, output, _, _ = candidate
     if isinstance(failure, subprocess.CalledProcessError):
         failure = worker.CommandFailure(["docker", "run"], subprocess.CompletedProcess([], 1, "canary suite failed", ""))
@@ -1122,9 +1152,11 @@ def test_canary_persists_validator_failure_without_candidate_artifacts(worker, c
         worker.validate_checkout_canary(repo, control, output)
 
     evidence = (output / "canary-validation.txt").read_text()
+    stderr = capsys.readouterr().err
     assert evidence.startswith("FAILED:")
     assert "canary" in evidence
     assert "frozen_baseline" in evidence and "candidate" in evidence
+    assert stderr.strip() == evidence.strip()
     assert not (output / "result.json").exists()
     assert not any(path.is_dir() for path in output.iterdir())
 
@@ -1215,6 +1247,78 @@ def workflow_incident():
                 "Workflow failure https://github.com/owner/repo/actions/runs/20/attempts/2",
     }
     return issue, {"key": record["key"], "origin": record["origin"]}
+
+
+@pytest.mark.parametrize("outcome", ["change", "no_change", "blocked"])
+@pytest.mark.parametrize("incident", [False, True])
+@pytest.mark.parametrize("merged", [False, True])
+def test_review_closed_during_run_is_superseded(
+    worker, proposal, publisher_api, monkeypatch, tmp_path, outcome, incident, merged,
+):
+    task, output, repo, remote = proposal
+    task["kind"] = "review"
+    issue, binding = workflow_incident()
+    if incident:
+        task.update(incident=binding, incident_subject="7")
+    pr = pull(state="closed", merged=merged, number=42, body="<!-- neurodesktop-agentic:issue:7 -->\nFixes #7")
+    calls, _, original_api = publisher_api
+
+    def api(path, payload=None):
+        if path == "repos/owner/repo/pulls/42":
+            calls.append((path, payload))
+            return pr
+        if path == "repos/owner/repo/issues/7":
+            return issue
+        return original_api(path, payload)
+
+    monkeypatch.setattr(worker, "api", api)
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    worker.write_json(output / "result.json", valid_result(outcome=outcome))
+    assert worker.publish(task, output, repo) is None
+    assert "superseded: PR closed during review" in summary.read_text()
+    assert not [payload for _, payload in calls if payload is not None]
+    assert worker.git("rev-parse", "HEAD", cwd=repo) == task["base_sha"]
+    assert not worker.git("ls-remote", "origin", f"refs/heads/{task['branch']}", cwd=repo)
+    assert worker.git("rev-parse", "main", cwd=remote) == task["base_sha"]
+
+
+@pytest.mark.parametrize("incident", [False, True])
+def test_review_closed_after_initial_lookup_is_superseded(
+    worker, proposal, publisher_api, monkeypatch, tmp_path, incident,
+):
+    task, output, repo, remote = proposal
+    task["kind"] = "review"
+    issue, binding = workflow_incident()
+    if incident:
+        task.update(incident=binding, incident_subject="7")
+    worker.git("push", "origin", f"HEAD:refs/heads/{task['branch']}", cwd=repo)
+    current = pull(number=42, body="<!-- neurodesktop-agentic:issue:7 -->\nFixes #7")
+    calls, _, original_api = publisher_api
+    original_pages = worker.pages
+
+    def api(path, payload=None):
+        if path == "repos/owner/repo/pulls/42":
+            calls.append((path, payload))
+            return json.loads(json.dumps(current))
+        if path == "repos/owner/repo/issues/7":
+            return issue
+        return original_api(path, payload)
+
+    def pages(path):
+        if path == "repos/owner/repo/pulls?state=open&per_page=100":
+            current["state"] = "closed"
+        return original_pages(path)
+
+    monkeypatch.setattr(worker, "api", api)
+    monkeypatch.setattr(worker, "pages", pages)
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    assert worker.publish(task, output, repo) is None
+    assert "superseded: PR closed during review" in summary.read_text()
+    assert not [payload for _, payload in calls if payload is not None]
+    assert worker.git("rev-parse", task["branch"], cwd=remote) == task["base_sha"]
+    assert worker.git("rev-parse", "HEAD", cwd=repo) == task["base_sha"]
 
 
 def test_workflow_incident_publication_cannot_close_it(worker, proposal, publisher_api, monkeypatch):
@@ -1516,8 +1620,11 @@ def test_persisted_incident_pr_rechecks_ownership_before_mutation(worker, propos
 
     monkeypatch.setattr(worker, "api", api)
     monkeypatch.setattr(worker, "pages", lambda path: [original] if "/pulls?" in path else [])
-    with pytest.raises(ValueError, match="stale"):
-        worker.publish(task, output, repo)
+    if kind == "review" and changed == "closed":
+        assert worker.publish(task, output, repo) is None
+    else:
+        with pytest.raises(ValueError, match="stale"):
+            worker.publish(task, output, repo)
     assert writes == []
     branches = worker.git("for-each-ref", "--format=%(objectname)", f"refs/heads/{task['branch']}", cwd=remote)
     assert branches == (task["base_sha"] if kind == "review" else "")

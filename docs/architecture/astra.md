@@ -93,7 +93,7 @@ with `module load` pinning each tool. It produces no manifest, so the viewer
 reads `spec-only` — see [the trust ladder](#astra-provenance-viewer) — and that
 is the honest reading, not a defect.
 
-`neurodesk-lc-materialize` is the optional Lightcone 0.5 module path. Run it
+`neurodesk lightcone materialize` is the optional Lightcone 0.5 module path. Run it
 from the project root, outside an existing allocation. It uses native
 `lc compute launch`, waits for readiness, runs `lc materialize`, and releases
 only the full cluster ID allocated by this invocation. It does not retry an
@@ -116,7 +116,7 @@ modules = ["fsl/6.0.7.22"]
 ```
 
 ```bash
-neurodesk-lc-materialize --cpus 2 --memory 8 --time 2h baseline/bet_brain
+neurodesk lightcone materialize --cpus 2 --memory 8 --time 2h baseline/bet_brain
 ```
 
 The installed `/opt/neurodesktop/lightcone-compute.yaml` offers one native Slurm
@@ -195,17 +195,20 @@ and hooks twice.
 OpenCode does not consume the marketplace's Claude/Codex hook manifest. The
 image therefore installs
 [`opencode_lightcone_hooks.js`](../../config/agents/opencode_lightcone_hooks.js)
-as a native OpenCode plugin. It executes the hook scripts from the same pinned
-`reproduction` checkout: `SessionStart` context is added through OpenCode's
-system transform, while the read reminder and write/edit validation results
-are appended to the corresponding tool output so the model sees them. Hook
-failures stay non-blocking, matching the upstream informational hooks.
+as a native OpenCode 2 plugin. It executes the hook scripts from the same pinned
+`reproduction` checkout: `SessionStart` context is added to the system prompt
+through the session `context` hook, while the read reminder and write/edit
+validation results are appended to the completed tool result through the tool
+`execute.after` hook, so the model sees them. OpenCode 2 file tools take a
+`path` argument, which the adapter resolves against the project directory and
+passes to the hooks as `file_path`. Hook failures stay non-blocking, matching
+the upstream informational hooks.
 
 Those hooks parse their payloads with `jq`, which the image installs for that
 purpose. Without it every hook exits non-zero and silently contributes no
 validation context, so `tests/container/test_astra_agent_skills_image.py`
-drives the real hook scripts end to end rather than only checking that the
-plugin is listed. That test also asserts that the pinned marketplace commit's
+drives the real hook scripts end to end through an OpenCode session with a
+scripted model, rather than only checking that the plugin is listed. That test also asserts that the pinned marketplace commit's
 `astra-pins.sh` matches the installed `astra-tools` and `astra-spec`: the skill
 must teach the schema version that `astra validate` actually speaks.
 
@@ -299,7 +302,7 @@ for their own analysis.
 
 Double-clicking an `astra.yaml` (or `*.astra.yaml`) in the JupyterLab file
 browser renders the same viewer without a kernel, the way NIfTI volumes open
-in FreeBrowse. The `neurodesk_astra_view.serverext` Jupyter server extension
+in NiiVue. The `neurodesk_astra_view.serverext` Jupyter server extension
 answers `GET <Jupyter Server base URL>/neurodesk-astra-view/graph?spec=…[&universe=…][&run=…]`
 by running `build_graph()` server-side — request paths are workspace-relative
 and rejected with a 404 before any read when absolute, traversing, or resolving

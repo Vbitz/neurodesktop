@@ -4,7 +4,7 @@ description: Claude Code and Codex installation, the OpenCode terminal wrapper,
   and OpenCode session pruning
 parent: ../architecture.md
 status: current
-last-reviewed: "2026-10-16"
+last-reviewed: "2026-11-01"
 ---
 
 # Coding agents
@@ -121,6 +121,32 @@ exec-ing the real binary as a TUI. Its Lightcone reproduction skills and the
 native adapter for their ASTRA hooks are described in
 [ASTRA integration](astra.md#lightcone-agent-skills).
 
+OpenCode 2 clients attach to a shared background server by default. That
+server outlives the TUI and keeps the environment of whichever command
+started it, so a key or token the wrapper has just set up would not reach the
+providers. The wrapper therefore appends `--standalone` to the TUI and to the
+`run`, `mini`, `models`, `session`, `stats`, and `api` commands, giving each a
+private server. An explicit `--server` or `--standalone` is passed through
+unchanged, as are the commands that manage OpenCode itself.
+
+The image default config and the helpers write `opencode.json` in the
+OpenCode 2 layout. A managed provider is a `providers` entry with `package`,
+`settings.baseURL`, and `settings.apiKey`, and the Brain Researcher server is
+an `mcp.servers` entry that a decline marks `disabled`. OpenCode 2 still reads
+the OpenCode 1 layout (`provider`, `npm`, `options`, and a flat `mcp` map) and
+normalizes each file before merging, so a project's 1.x override still applies
+over the global 2.x entry. Within one file, a `providers` entry replaces a
+`provider` entry of the same name entirely.
+
+Homes written by earlier images move to the new layout as the wrapper
+refreshes them. A managed 1.x provider entry moves to `providers` when it
+holds only the fields the image wrote (`npm`, `name`, `options.baseURL`,
+`options.apiKey`, and model names and limits). An entry with any other field
+is refreshed where it is, because that field's OpenCode 2 spelling differs. A
+user's own Ollama entry with a custom SDK or endpoint is never moved. A
+malformed managed entry is replaced. The old `mcp.brain-researcher` entry
+moves to `mcp.servers`.
+
 The shared model helper,
 [`config/agents/opencode_update_config.py`](../../config/agents/opencode_update_config.py),
 is installed as `/opt/neurodesktop/opencode_update_config.py`. Both the terminal
@@ -162,25 +188,30 @@ under the default home's `.config/opencode/plugins/`. Startup restores this
 plugin alongside the existing Lightcone plugin. OpenCode discovers it in the
 user's global plugin directory even when `OPENCODE_CONFIG` or
 `OPENCODE_CONFIG_DIR` selects additional config. It activates only when the quiet
-launcher supplies an observation.
+launcher supplies an observation. The observation carries the discovered
+endpoint and contexts, the endpoints that mark a provider as image-managed, and
+the image's seed Ollama models.
 
-OpenCode 1.19.3 [resolves configuration before initializing plugins](https://github.com/anomalyco/opencode/blob/v1.19.3/packages/opencode/src/project/bootstrap.ts)
-for each directory and awaits each plugin's `config` hook before other services. The hook
-passes that directory's Ollama settings and selected models to the shared
-helper through stdin. The helper returns only missing model metadata and the
-managed endpoint delta. The plugin applies these fields directly to native
-config objects, replacing the provider map because native config merges can
-share nested objects between directories. It never serializes them back through OpenCode's interpolation
-parser or writes user config. T3 can therefore use one OpenCode server for
-projects opened after server startup, each with its own settings.
+OpenCode 2 applies configured providers after plugin provider transforms, so a
+provider transform cannot change a configured endpoint. The plugin registers a
+model transform instead. That transform runs once per location (project
+directory), after the location's configuration has resolved, including
+projects opened after the server started. It reads the resolved Ollama
+provider and leaves it alone when the provider uses another SDK package or an
+endpoint outside the managed set: a custom endpoint or SDK remains user-owned.
+Otherwise it adds each discovered model with its observed context, keeping a
+saved model's own limits unless that entry is the unchanged image seed. It
+puts the observed endpoint on every Ollama model, because model settings are
+the layer that wins over configured provider settings. It disables an
+unchanged seed model that Ollama did not report, which hides it from the
+model list; removing a configured model has no effect in OpenCode 2. User
+models stay visible. It never writes user configuration.
 
-OpenCode merges global, explicit-file, project, and inline configuration in
-that order, with managed administrator configuration last. Provider model maps
-deep-merge. The quiet hook uses the provider's `whitelist` to hide an unchanged
-image seed while preserving user models, model limits, selected defaults, and
-explicit filters. A custom endpoint or SDK remains user-owned. No quiet launch
-prompts, copies project instructions, refreshes NBI, or restarts an active chat.
-`--version` executes the real binary before any setup.
+OpenCode merges managed administrator configuration, project `.opencode`
+files, project `opencode.json` files, and global configuration, with inline
+`OPENCODE_CONFIG_CONTENT` above project files. No quiet launch prompts, copies
+project instructions, refreshes NBI, or restarts an active chat. `--version`
+executes the real binary before any setup.
 
 `nbi_setup.sh` mirrors the OpenCode model selection into Notebook Intelligence
 with
@@ -210,12 +241,14 @@ Session sharing is disabled by default in
 (`"share": "disabled"`) so research conversations are not uploaded to the
 OpenCode share service unless a user opts in.
 
-The wrapper also seeds `~/.local/state/opencode/kv.json` with
-`"sidebar": "hide"` so the TUI's right-hand session sidebar (context usage,
-LSP status) starts hidden and the full width goes to the conversation.
-OpenCode persists the `ctrl+x b` toggle under the same key, so the wrapper
-only writes it when absent and a user who re-enables the sidebar keeps that
-choice.
+The wrapper also hides the TUI's right-hand session sidebar (context usage,
+LSP status) by default so the full width goes to the conversation. OpenCode 2
+keeps that choice as `session.sidebar` in `~/.config/opencode/cli.json`. Its
+first TUI start creates that file by migrating the OpenCode 1
+`~/.local/state/opencode/kv.json`, so the wrapper seeds `"sidebar": "hide"` in
+`kv.json` until `cli.json` exists and in `cli.json` afterwards. It writes the
+value only when absent, so a user who re-enables the sidebar with `ctrl+x b`
+keeps that choice, and it leaves a `cli.json` it cannot parse unchanged.
 
 ## Agent tool shells and preflight
 
@@ -223,7 +256,9 @@ The terminal and ACP launchers for Codex and Claude, the OpenCode wrapper,
 and all T3 provider launchers export
 `BASH_ENV=/opt/neurodesktop/agent_bash_env.sh` through a shared shell setup.
 An existing `BASH_ENV` is retained in `NEURODESKTOP_PREVIOUS_BASH_ENV` and
-sourced before Neurodesk initialization. Launchers do not emit setup banners
+sourced before Neurodesk initialization. As in Bash, an unreadable initializer
+is skipped; host clusters such as Sherlock export a `BASH_ENV` path that is not
+mounted in the container. Launchers do not emit setup banners
 into agent protocol streams.
 For login tool shells, `/etc/profile.d/zz-neurodesk-agent.sh` restores the
 shared `BASH_ENV` after Lmod's system profile. It applies only to descendants
@@ -242,13 +277,15 @@ Bash call, including interactive calls. Automatic initialization depends on
 the runner preserving `BASH_ENV`; interactive Bash does not read that variable.
 Agents must not assume that a fresh tool shell has initialized Lmod.
 
-`neurodesk-astra-provenance` is the other agent-facing command on `PATH`. The
+`neurodesk astra` is the other agent-facing command. Agent guidance calls it
+by its installed name, `neurodesk-astra-provenance`, as released agent skills
+do. The
 contract routes every published output through its `publish` subcommand and
 ends every analysis with its `check` subcommand, which is the only mechanism
 that compares a specification's declared software with what really ran. See
 [ASTRA integration](astra.md#recording-what-ran).
 
-`neurodesk-agent-preflight` reports the installed guidance revision, differences
+`neurodesk agent preflight` (`neurodesk-agent-preflight` in agent guidance) reports the installed guidance revision, differences
 from workspace `AGENTS.md` or `CLAUDE.md`, Lmod availability, and live Slurm
 node capacity and state. Its scheduler query has a 15-second timeout.
 Differences can represent project edits or an older seed; preflight never
@@ -265,12 +302,16 @@ job IDs and the next status command instead of chaining shell sleeps.
 OpenCode keeps session history in `~/.local/share/opencode/opencode.db`, not in
 the working directory, and never prunes it. Deleting a project directory
 therefore leaves its sessions in OpenCode's session index forever, pointing at
-paths that are gone.
+paths that are gone. OpenCode 2.2.5 still behaves this way. Its
+`opencode session list` shows only the current project, but the server's
+unscoped `/api/session` and `/api/project` lists, which the web app reads, keep
+the deleted directory's sessions and project. OpenCode 2 offers only
+`opencode session delete <id>`, with no bulk or stale-directory pruning.
 
 [`config/agents/opencode_prune_sessions.py`](../../config/agents/opencode_prune_sessions.py)
 (installed as `/opt/neurodesktop/opencode_prune_sessions.py`) is a manual
-recovery and administration tool that removes sessions whose working directory
-no longer exists. Run it without `--apply` to review a dry-run report, then run
+recovery and administration tool that removes sessions and projects whose
+directory no longer exists. Run it without `--apply` to review a dry-run report, then run
 it with `--apply` to perform the deletion. It is never invoked automatically by
 container startup. `NEURODESKTOP_OPENCODE_PRUNE_SESSIONS=0` disables an
 explicit invocation, which can be useful as a site-level safety override.
@@ -282,7 +323,10 @@ startup can delay the Jupyter server bind, while detaching it can instead
 contend with a newly launched OpenCode process. Database maintenance must be an
 explicit operator action rather than a prerequisite for starting a session.
 
-Three details make the deletion safe and complete:
+OpenCode 2 stores sessions in `session_v2`. When it migrates an OpenCode 1
+home it copies the sessions there and keeps the original `session` table, so
+the tool reads and deletes both. Three details make the deletion safe and
+complete:
 
 - **A missing directory is not enough.** The parent must still exist, which
   proves the filesystem is mounted and the directory really was removed. A
@@ -290,11 +334,22 @@ Three details make the deletion safe and complete:
   missing and is left alone — startup ordering must never be able to destroy
   live history.
 - **`PRAGMA foreign_keys` must be on.** SQLite leaves it off by default, so a
-  plain `DELETE FROM session` orphans every cascading table (`message`,
-  `todo`, `session_share`, `session_message`, `session_input`,
-  `session_context_epoch`, and `part` via `message`).
-- **`event` and `event_sequence` never cascade.** They key off the session id
-  but declare no foreign key, so they are swept explicitly.
+  plain `DELETE` orphans every cascading table: `session_message`,
+  `session_part`, `session_inbox`, the instruction tables, `schedule`, and
+  `blob_ref` in OpenCode 2, and `message`, `part`, `todo`, and
+  `session_share` in the OpenCode 1 tables.
+- **`event_sequence` and `job` never cascade.** They key off the session id
+  but declare no foreign key, so the rows for each pruned session are deleted
+  explicitly; deleting a sequence cascades to its `event` rows.
+
+A project is removed only when every directory recorded for it (its worktree,
+`project_directory`, and `worktree` rows) passes the same deleted-directory
+test and none of its sessions survive the prune. Deleting a project cascades
+to its sessions, so a project that still holds a live session is kept. The
+`global` project is never removed. Its `permission`, `project_directory`, and
+`worktree` rows cascade, and its `event_sequence` rows are deleted explicitly.
+Against OpenCode 2.2.5, a pruned session and project stay absent from
+`/api/session` and `/api/project` after the server restarts.
 
 The pre-prune database is kept as a single rolling `opencode.db.prune-backup`
 so repeated manual maintenance cannot grow backup history without bound.

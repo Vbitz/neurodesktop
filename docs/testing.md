@@ -4,7 +4,7 @@ description: Two-tier test suite, per-area focused test commands, container
   build/run modes, and the negative-test convention
 parent: index.md
 status: current
-last-reviewed: "2026-10-23"
+last-reviewed: "2026-11-16"
 ---
 
 # Testing
@@ -51,7 +51,17 @@ tier and the installed ASTRA example to be world-readable so tests run as
 ```bash
 pytest tests/unit          # from a checkout, no container needed
 pytest /opt/tests/         # inside the built image
+neurodesk test             # the same, from any Neurodesktop terminal
 ```
+
+The installed [uv environment helper](architecture/uv-environments.md) is covered
+by `pytest tests/unit/test_uv_kernel_prototype.py` and, as the notebook user,
+`pytest /opt/tests/test_uv_kernel_image.py`. The image test needs package-index
+access for initial setup, then rebuilds a moved project offline using its warm
+cache. It starts a real kernel and checks module initialization and environment
+isolation, as well as the installed command's interpreter and ownership. It
+also writes an isolated uv authentication entry under a permissive umask and
+requires owner-only modes on the plaintext credential store.
 
 Running `tests/unit` needs GCC, X11 development headers, Xvfb, and `xrandr`
 for the Glass helpers,
@@ -72,13 +82,16 @@ as those entries change its position.
 The launcher DOM regressions, including T3 iframe file-link capture, reloads,
 disposal, and the T3 Connect panel, also require jsdom and TypeScript.
 ASTRA document tests additionally load the
-real JupyterLab registry, document context, and Lumino widgets. Install them
+real JupyterLab registry, document context, and Lumino widgets. The document
+harness supplies an inert `ResizeObserver` adapter because jsdom does not
+compute layout. These cases cover document lifecycle rather than toolbar
+resizing. Install the dependencies
 in a temporary directory and expose that directory when running the suite:
 
 ```bash
 npm install --prefix /tmp/neurodesk-launcher-tests --no-audit --no-fund jsdom@26.1.0 typescript@5.9.3 esbuild@0.28.2 \
-  @jupyterlab/docregistry@4.6.4 @jupyterlab/coreutils@6.6.4 \
-  @jupyterlab/services@7.6.4 @lumino/widgets@2.10.0
+  @jupyterlab/docregistry@4.6.5 @jupyterlab/coreutils@6.6.5 \
+  @jupyterlab/services@7.6.5 @lumino/widgets@2.10.0
 export NEURODESKTOP_LAUNCHER_TEST_NODE_MODULES=/tmp/neurodesk-launcher-tests/node_modules
 pytest tests/unit
 ```
@@ -112,7 +125,7 @@ Use `testlib.repo_path()` to locate repository sources in unit tests. The frozen
 baseline redirects that helper to the candidate checkout; source roots derived
 from the test file's `__file__` instead point into the tests-only snapshot.
 
-Two modules need heavier optional dependencies and skip cleanly when they are
+Three modules need heavier optional dependencies and skip cleanly when they are
 absent rather than failing a plain checkout; CI installs them, so they always
 run there:
 
@@ -124,6 +137,54 @@ run there:
   further packages.
 - `tests/unit/test_astra_view_filebrowser.py` needs `jupyter-server` to drive
   the file-browser server extension.
+- `tests/unit/test_module_usage_hook.py` needs Ubuntu's `lmod` package to load
+  modules through the real Lmod with the
+  [citation site package](architecture/citations.md).
+
+## Remote compute jobs
+
+Run `pytest tests/unit/test_remote_jobs.py`. It drives the client and the
+cluster helper through local `ssh`, Slurm and Apptainer stand-ins. It covers:
+
+- site discovery and the errors users see, including rejected Slurm options;
+- checksummed staging and upload deduplication;
+- worker failures before analysis, failed validation and uncollectable outputs;
+- verified result downloads;
+- submission races, lost responses and accounting uncertainty;
+- cancellation and unsafe archives;
+- Python 3.9 syntax for the helper; standard-library APIs newer than 3.9
+  are not detected.
+
+It needs neither DataLad nor Slurm.
+
+In the image, as the notebook user, run
+`pytest /opt/tests/test_remote_jobs_image.py`. It uses real DataLad for
+nested source snapshots, collection into a result dataset, and archive
+restoration after the fixture's scratch store has been removed. The test
+does not contact an HPC.
+
+Against a real site, run `neurodesk jobs connect HOST`, then run a synthetic
+end-to-end analysis with the installed CLI:
+
+```bash
+python scripts/verify_remote_jobs.py --image /project/busybox.sif \
+  --workspace /project/new-smoke-directory
+```
+
+Add `--state DIR` if `connect` used one. The SIF must contain `sh` and `awk`.
+The script:
+
+- creates a nested input dataset;
+- submits a real Slurm job;
+- checks that repeated submission returns the same ID;
+- retrieves the validated mean;
+- archives it and restores the archive with Git SSH disabled.
+
+It keeps its run, workspaces and archive for inspection. Passing a local
+fixture does not establish site support. The
+[site acceptance checklist](architecture/remote-jobs.md#site-acceptance)
+lists the further SSH, Slurm, storage and MFA experiments. The script does not
+remove site stores or prove the separate cancellation, MFA or filesystem gates.
 
 ## Code quality checks
 
@@ -185,7 +246,7 @@ in `mypy.ini`. Expand these scopes in reviewed changes rather than reformatting
 unrelated files to fix a correctness finding.
 
 The strict scope covers the provider credential policy, the OpenCode
-`opencode.json` update helper, and the T3 package's process side: the supervisor, its environment naming, the Jupyter lifecycle
+`opencode.json` update helper, the `neurodesk cite` command, and the T3 package's process side: the supervisor, its environment naming, the Jupyter lifecycle
 adapter and the extension entry point. The same modules are in the Ruff
 formatter scope. mypy skips unlisted modules, so a checked module's callers
 are listed with it. The lifecycle adapter's `ExtensionApp` base is typed by
@@ -372,9 +433,12 @@ notebook user without unrestricted sudo and requires pixels over Guacamole.
 A read-only X11 probe identifies the new notebook-user XRDP process and its
 display and authority file. Before Alt+F2, it waits for WM registration and a
 mapped LXDE panel. Before typing, it requires a mapped, active Run dialog with
-one of its children holding keyboard focus. These bounded waits also read the
-Guacamole tunnel and fail on disconnects or protocol errors. The test launches
-a command entirely through Guacamole keyboard input and checks its output file.
+one of its children holding keyboard focus. A mapped panel does not prove the
+end-to-end RDP keyboard path is ready on a slow session, so the same bounded
+wait replays Alt+F2 once per second until the dialog responds. These bounded
+waits also read the Guacamole tunnel, acknowledge its sync flow-control
+messages, and fail on disconnects or protocol errors. The test launches a
+command entirely through Guacamole keyboard input and checks its output file.
 The marker lives in a fresh, session-owned temporary directory, so root-run tests
 remain writable by the desktop user and cannot accept a prior result. A login
 screen alone does not satisfy this check. Enable it only in disposable test
@@ -457,13 +521,28 @@ passes does `merge-manifests` promote the architecture, date, and `latest` tags
 and copy them to configured registries. Failed candidates remain available for
 diagnosis under their run tags; they do not replace release tags.
 
-`pytest tests/unit/test_trivy_policy.py` checks the packaging contract for the
-twelve kernel CVE exceptions added after issues #1142 and #1152. Each
-exception requires
-the exact assessed Ubuntu `linux-libc-dev` package version and an expiry no
-later than 2026-11-20. The image scans apply these rules through Trivy's shared
-ignore file. The [build reference](architecture/build.md#publication)
-records why the headers remain installed and how the exceptions are bounded.
+The production workflow retries a failed architecture build once after 30
+seconds. Both attempts use the same source SHA, build arguments, cache, and
+run-specific candidate tag, so a transient upstream registry failure can recover
+without changing the artifact that later test and scan jobs consume. A failed
+second attempt still fails the build job and prevents promotion.
+
+`pytest tests/unit/test_trivy_policy.py` checks the packaging contract for
+image-scan exceptions. Every exception must name exact package URLs, expire
+within 90 days, and carry a statement; the kernel-header exceptions that Ubuntu
+has since fixed must not return. The image scans apply the policy through
+Trivy's shared ignore file. The [build reference](architecture/build.md#publication)
+records why the headers remain installed and how exceptions are bounded.
+
+`pytest tests/unit/test_conda_rattler_security.py` protects the temporary
+removal of the vulnerable optional Rattler solver without adding a Trivy
+exception. The installed-image `test_conda_rattler_security_image.py` confirms
+that both Rattler packages and their native module are absent, `libmamba` is
+selected, the vulnerable `py-rattler` line is disallowed, and an installation
+from a generated local channel succeeds without network access. Harmless fixture
+packages named `py-rattler` test rejection of 0.27.0 and acceptance of 0.28.0,
+checking enforcement
+of the vulnerable-version restriction without blocking the fixed line.
 
 `pytest tests/unit/test_python_ca_security.py` protects the fixed `pip`,
 `certifi`, and `uv` version floors for their bundled CA stores. The
@@ -471,6 +550,12 @@ installed-image suite's `test_python_ca_security.py` parses both the main
 `certifi` bundle and pip's vendored copy and rejects the two distrusted
 emSign G3 roots. The ASTRA agent-skills test continues to execute
 the image's pinned `uv` binary.
+
+`pytest tests/unit/test_brotli_security.py` protects the direct fixed Brotli
+version and its build-time metadata check. The installed-image tests require
+one fixed package release and exercise compression and decompression through
+the shipped extension module.
+
 The checkout tests execute the build's `uv` version check with release banners
 containing target or commit metadata. They require the exact pinned version
 and reject a failing command even when it prints the expected release.
@@ -554,6 +639,9 @@ in, and is installed next to the container tier at `/opt/tests/testlib.py`
   resolved the same way.
 - `run_cmd(cmd, cwd=, env=, timeout=)` — shell out and return
   `(exit_code, combined_output)`. `env` overlays the caller's environment.
+- `run_cmd_streams(cmd, cwd=, env=, timeout=)` — shell out and return
+  `(exit_code, stdout, stderr)` when stdout is itself the value under test and
+  diagnostics must remain separate. `env` overlays the caller's environment.
 
 ## Focused tests by area
 
@@ -564,9 +652,11 @@ non-obvious tiers protect.
 
 | Area | On a checkout | In the built image |
 | --- | --- | --- |
+| `neurodesk` command and helper help text | `pytest tests/unit/test_neurodesk_cli.py tests/unit/test_neurodesk_update.py tests/unit/test_remote_jobs.py tests/unit/test_uv_kernel_prototype.py` | `pytest /opt/tests/test_neurodesk_cli_image.py`; `neurodesk test` runs the whole tier |
 | Jupyter isolated build dependencies | `pytest tests/unit/test_jupyter_build_constraints.py tests/unit/test_jupyterlab_slurm_build.py` | Fresh isolated wheel builds for Slurm and launcher |
 | Image packaging layers | `pytest tests/unit/test_image_packaging_layers.py tests/unit/test_myst_build_workaround.py` | `pytest /opt/tests/test_image_size_hygiene.py /opt/tests/test_additional_components.py` and image layer inventory |
 | PyJWT asymmetric/HMAC key confusion | `pytest tests/unit/test_pyjwt_security.py tests/unit/test_audit_image_versions.py` | `pytest /opt/tests/test_pyjwt_security.py` |
+| Brotli decoder out-of-bounds write | `pytest tests/unit/test_brotli_security.py tests/unit/test_audit_image_versions.py` | `pytest /opt/tests/test_brotli_security.py` |
 | Python bundled CA trust | `pytest tests/unit/test_python_ca_security.py tests/unit/test_audit_image_versions.py` | `pytest /opt/tests/test_python_ca_security.py /opt/tests/test_astra_agent_skills_image.py` |
 | ghapi public credential examples | `pytest tests/unit/test_ghapi_examples.py tests/unit/test_image_packaging_layers.py` | `pytest /opt/tests/test_image_size_hygiene.py` and unchanged image secret scan |
 | Anthropic SDK public credential examples | `pytest tests/unit/test_anthropic_examples.py tests/unit/test_image_packaging_layers.py` | `pytest /opt/tests/test_anthropic_examples.py` and unchanged image secret scan |
@@ -581,7 +671,8 @@ non-obvious tiers protect.
 | Access-URL banner (`print_access_url.sh`) | `pytest tests/unit/test_print_access_url.py` | — |
 | Sherlock launcher (`scripts/connectSherlock.sh`) | `pytest tests/unit/test_connect_sherlock.py` | — |
 | Neurocommand container-store layout | `pytest tests/unit/test_container_storage_link.py` | `pytest /opt/tests/test_neurocommand_storage_image.py` |
-| SSH startup opt-out | `pytest tests/unit/test_sftp_sshd_security.py tests/unit/test_ssh_proxy_policy.py tests/unit/test_connect_sherlock.py` | `pytest /opt/tests/test_ssh_proxy_policy.py /opt/tests/test_desktops.py -k 'ssh_proxy or ssh-disabled or vnc_backends_bind_localhost_only'` |
+| Guacamole/Tomcat listener confinement | `pytest tests/unit/test_configure_tomcat.py tests/unit/test_desktop_launcher_modes.py` | `pytest /opt/tests/test_desktops.py -k guac_api_connections` |
+| SSH/SFTP confinement and startup opt-out | `pytest tests/unit/test_sftp_sshd_security.py tests/unit/test_ssh_proxy_policy.py tests/unit/test_connect_sherlock.py` | `pytest /opt/tests/test_ssh_proxy_policy.py /opt/tests/test_desktops.py -k 'ssh_proxy or ssh-disabled or vnc_backends_bind_localhost_only'` |
 | T3 Code server, web UI, lifecycle, and packaging | `pytest tests/unit/test_t3_code_server.py tests/unit/test_t3_startup_settings.py tests/unit/test_t3_code_web.py` | `pytest /opt/tests/test_t3_code_server_image.py /opt/tests/test_t3_code_web_image.py` |
 | Tailscale binary packaging | `pytest tests/unit/test_tailscale_packaging.py tests/unit/test_audit_image_versions.py` | `pytest /opt/tests/test_tailscale_image.py` |
 | Guided T3/Tailscale setup | `pytest tests/unit/test_t3_neurodesk_setup.py tests/unit/test_t3_code_server.py` | `pytest /opt/tests/test_tailscale_image.py /opt/tests/test_t3_code_server_image.py` |
@@ -594,6 +685,7 @@ non-obvious tiers protect.
 | Notebook Intelligence / MyST and standalone RISE | `pytest tests/unit/test_nbi_settings_patch.py tests/unit/test_myst_build_workaround.py tests/unit/test_jupyterlab_rise_patch.py` | `pytest /opt/tests/test_nbi_labextension_patch.py /opt/tests/test_rise_slides_image.py` |
 | Launcher extension, workspace link routing | `pytest tests/unit/test_workspace_link_routing.py tests/unit/test_jupyterlab_url.py` | `pytest /opt/tests/test_workspace_link_routing_image.py` |
 | Slurm dashboard launcher and user identity | `pytest tests/unit/test_launcher_webapps.py tests/unit/test_slurm_user_identity.py tests/unit/test_jupyterlab_slurm_build.py` | `pytest /opt/tests/test_slurm.py /opt/tests/test_workspace_link_routing_image.py` |
+| Slurm private-worker source fetch and build | `pytest tests/unit/test_slurm_env_compat.py` (needs GNU `sha256sum`) | `bash scripts/verify_slurm_image.sh IMAGE` |
 | Subscription agent workflows and failure reporting | `pytest tests/unit/test_agentic_*.py tests/unit/test_report_workflow_failure.py` | Worker Docker sandbox probe |
 
 ### Jupyter Server Proxy response limits
@@ -627,11 +719,19 @@ reuses a real daemon through the installed wizard and checks that it has its
 own session. A separate image test mints a link through the installed `t3`
 CLI, so a pinned-version bump that changes those flags or their JSON fails in
 CI rather than during a manual desktop pairing.
-For manual acceptance, run `t3_neurodesk_setup` in a JupyterLab terminal,
+For manual acceptance, run `neurodesk t3` in a JupyterLab terminal,
 follow its desktop connectivity check, complete pairing in T3, and verify
-the remote providers. Then rerun `t3_neurodesk_setup --check`.
+the remote providers. Then rerun `neurodesk t3 --check`.
 
 ### T3 Code server
+
+The T3 browser acceptance test reserves distinct loopback ports for Jupyter,
+T3, and Firefox together. It releases the Jupyter/T3 pair immediately before
+starting Jupyter, which owns T3 startup, and starts Firefox only after T3 is
+ready. This prevents the test's own port selections from colliding, while an
+unrelated process could still take a port during handoff. A parked T3 service
+fails immediately with the selected ports and the test Jupyter log, with its
+synthetic authentication token redacted.
 
 The web unit tests require `jupyter-server-proxy` and Node.js. CI installs the
 local T3 extension to supply the proxy dependency. They cover the URL-prefix
@@ -661,10 +761,12 @@ The same test checks that the seeded OpenCode instance reports enabled, which
 is the state T3 withholds from a driver it ships disabled. T3 probes OpenCode
 lazily, so that record can still be the unchecked placeholder; a separate image
 test covers the start contract instead. T3 reads a semantic version from
-`--version`, refuses releases below its floor, then runs `serve` and waits for
-the `opencode server listening` line carrying the server URL. OpenCode's ACP
-probe does not cover this path, because T3's driver speaks the OpenCode SDK
-rather than ACP.
+`--version` and selects its OpenCode 2 client for a 2.x release. It runs
+`serve` with a generated `OPENCODE_PASSWORD`, waits for the
+`server listening on` line carrying the server URL, and proves readiness with
+an authenticated `/api/info`. The test also checks that an unauthenticated
+request is rejected. OpenCode's ACP probe does not cover this path, because
+T3's driver speaks the OpenCode SDK rather than ACP.
 
 The checkout test drives the process supervisor with a real temporary child
 process. It also checks the pinned package, image cleanup, server extension,
@@ -687,8 +789,8 @@ provider settings intact.
 fixtures and executes quiet launchers with fresh homes. It covers the total
 deadline, metadata fallback, empty and failed listings, credential isolation,
 concurrent process-local observations, preserved configuration, interpolation
-rejection, and `--version`. The plugin driver executes the actual native config
-hook against resolved fixture objects.
+rejection, and `--version`. The plugin driver runs the plugin's setup and the
+model transform it registers against a resolved provider record.
 
 Inside the image, `pytest /opt/tests/test_t3_ollama.py` starts a private T3 server
 with the image-owned OpenCode path. It authenticates through T3's bearer-session
@@ -698,17 +800,21 @@ model in T3's picker and a completed assistant result in the durable projection.
 The persistent OpenCode config must retain its original bytes. A concurrent
 quiet launch during the controlled turn must leave that turn on its original
 attempt. The same module tests native JSONC merge precedence, saved offline
-configuration, successful empty catalogs, and ACP stdout as JSON. It starts an
+configuration, successful empty catalogs, and a complete ACP session over
+JSON stdout. It reads OpenCode 2's resolved models through the authenticated
+`/api/model` and `/api/model/default` routes for each location. It starts an
 OpenCode server outside a project, creates that project after startup, and
 compares its custom endpoint, model limits, and selection with native OpenCode.
 Environment and file canaries must never appear in discovered model metadata;
 intentional user configuration references must still resolve.
 
-The ACP stdout check sets `npm_config_offline=true` for its child process. Its
-local Ollama plugin needs no npm packages. This keeps the 40-second protocol
-check independent of OpenCode's first-use registry installation while still
-loading the installed plugin and executing the real image binary. Other
-first-use and completion checks retain native dependency installation.
+The ACP session check sets `npm_config_offline=true` for its child process. Its
+local Ollama plugin needs no npm packages. This keeps the protocol check
+independent of OpenCode's first-use registry installation while still loading
+the installed plugin and executing the real image binary. It keeps stdin open
+until each reply arrives, as ACP clients do, because OpenCode 2 exits on end of
+input without answering. Other first-use and completion checks retain native
+dependency installation.
 
 For the live gate, run the image on a Docker network where an Ollama server with
 a downloaded model is reachable as `host.docker.internal:11434`. Set
@@ -747,22 +853,74 @@ routes return 404, mode `0600` after the rename, signal forwarding, early exit,
 cleanup of code-server when the launcher is killed, and an orphan from a
 timed-out launch shutting down while the next launch starts.
 
+The desktop tunnel test acts as a Guacamole protocol client: it acknowledges
+`sync` instructions and sends `nop` keepalives while waiting for pixels.
+Unit tests capture its outbound sync replies for both legacy and Guacamole 1.6
+messages, and verify periodic keepalives continue during idle observation.
+The combined-backend SSH-disabled case observes the rendered session for
+20 seconds after the first pixels arrive, beyond guacd's 15-second
+client-input timeout, even when initial rendering nearly exhausts its deadline. Error frames and
+premature disconnects fail even after pixels arrive. Failure reports include
+the expected VNC port instead of the credential-bearing connection XML.
+
 Desktop smoke tests keep Guacamole, Tomcat, VNC, and credential state in
 temporary per-test homes by default. VNC tunnel cases cover fresh and legacy
 homes without the XDG config parent, an absolute override, and an ignored
-relative override. SSH-disabled cases start with stale SFTP port state,
-require the SFTP connection to be disabled without a new SSH daemon, and
-receive desktop frames through the authenticated VNC tunnel. The combined-backend
+relative override. The checkout SFTP startup test forces a competing listener
+to win the race between automatic port selection and sshd's bind, then requires
+startup to retry and publish the new listener. It also covers runtimes that
+hide `ss` process annotations: startup must match the listener socket inode to
+the daemon process and must reject the same port when another process owns its
+socket. The readiness tests advance the fake listener on the first polling
+sleep and exercise both successful and failed startup without waiting in real
+time. SSH-disabled cases start with stale SFTP port state, require the SFTP
+connection to be disabled without a new SSH daemon, and receive desktop frames
+through the authenticated VNC tunnel. The combined-backend
 case exercises the template that enables SFTP by default. The installed
 SSH proxy tests load the shipped Jupyter configuration and verify that the
 `sshd` route and its host-key generation disappear only when
 `NEURODESKTOP_DISABLE_SSH=true`.
 The VNC tunnel cases require saved settings to survive TigerVNC's migration
 and actual desktop frames to arrive over the authenticated tunnel.
+The RDP tunnel case sends Alt+F2 through Guacamole and executes a command in
+LXDE's Run dialog. Its X11 observer runs out of process so a dead display cannot
+terminate pytest; a single observation timeout is retried within the existing
+readiness deadline, while repeated timeouts remain a failure with the last
+successful X11 state in the report. Alt+F2 is also retried within that deadline
+because the panel can map before the end-to-end RDP keyboard path is ready.
 Tests that need to start the global xrdp service are skipped unless
 `NEURODESKTOP_TEST_ALLOW_GLOBAL_DESKTOP_SERVICES=1` is set. The build scripts and
 GitHub Actions set this only for disposable test containers; do not set it in a
 live user desktop unless stopping or reconfiguring xrdp is acceptable.
+
+voxl desktop streaming has checkout and installed-image tests.
+[`pytest tests/unit/test_voxl_launcher.py`](../tests/unit/test_voxl_launcher.py)
+runs the launcher against fake Xvfb, session, and `voxl` executables. It checks:
+
+- loopback binding and the token in voxl's environment;
+- skipping a busy display;
+- readiness only through `-displayfd`;
+- making the framebuffer private before the session or voxl starts;
+- the default and configured resize scale and maximum screen size, and
+  refusing invalid values before anything starts;
+- refusing a framebuffer that cannot be made private;
+- the missing-token refusal;
+- SIGTERM stopping voxl and the desktop session before Xvfb.
+
+[`pytest tests/unit/test_shm_private.py`](../tests/unit/test_shm_private.py)
+compiles the framebuffer helper and runs it on real mode-`0777` SysV segments.
+It requires mode `0600` afterwards and exit status 2 when another process is
+already attached. The voxl cases in `tests/unit/test_desktop_launcher_modes.py`
+check that the proxy's Bearer header matches the launcher token.
+`/opt/tests/test_voxl_image.py` starts the installed launcher with real Xvfb
+and voxl. It requires:
+
+- HTTP 401 without the token;
+- no TCP listener on Xvfb;
+- direct framebuffer capture;
+- smooth scrolling through the patched Xvfb's XTEST scroll axes;
+- a mode-`0600` segment held only by Xvfb and voxl;
+- neither Xvfb nor its segment left after the launcher stops.
 
 For focused Apptainer build checks:
 
@@ -869,6 +1027,12 @@ successful session or the protocol's authentication-required response is
 accepted only after the expected CLI invocation is observed. Other errors,
 process exits, and timeouts fail the test. This check covers adapter upgrades
 that use an image CLI outside the adapter's declared dependency range.
+Both image builds require `codex --version` to succeed and match the requested
+pin. Checkout tests execute these guards against matching, stale, and failing
+CLIs. The installed test compares the executable's stdout with its global npm
+package metadata so a stale platform binary cannot masquerade as the updated
+package. Stderr is kept apart for failure diagnostics because Codex reports
+best-effort startup cleanup warnings there without failing the command.
 
 The installed T3 startup cases exercise fresh and legacy defaults. They wait
 for Claude's completed health probe, compare its version with the image CLI,
@@ -1002,6 +1166,15 @@ can deliver a delayed document notification after the manual refresh completes,
 so the viewer can briefly show its loading state again. The test polls for the
 complete result within its existing deadline and sends the Refresh click once.
 
+ASTRA browser clicks wait for the target to be stable and for at least one
+interior point to be unobscured, then use its native BiDi element reference and
+the exposed point's relative offset. A layout change between discovery and
+input therefore keeps the click on the intended element. The installed Firefox
+regressions in `test_astra_browser_click_image.py` move the target immediately
+before input, partially or briefly cover it before clicking, and require a
+persistently covered target to fail without clicking. The readiness wait
+expires before the BiDi transport timeout.
+
 ### Nightly JupyterHub probe
 
 `.github/workflows/jupyter_test_main.yml` drives each live instance over the
@@ -1043,8 +1216,25 @@ model with `jq` into `ready`, `pending:<action>`, `starting`, or `stopped`.
 It prefers `servers[""]` and falls back to the top-level `server` and
 `pending` fields. The Hub keeps the `server` key as `null` once a server
 stops, so cleanup waits for `stopped` rather than for the key to disappear.
-Cleanup repeats the stop request while a timed-out spawn is still pending.
-The unit tier runs both workflow steps against a stubbed `curl` and `sleep`.
+After the spawn request, startup succeeds only when the default server reports
+`ready`. A return to `stopped` means the Hub abandoned the spawn, through its
+own spawn timeout or a spawner error, so the step fails at once and reports a
+Hub-side spawn failure. A response without a server state, such as a proxy error page, does
+not end the wait. Ten minutes of `pending:spawn` is the backstop for a spawn the
+Hub never resolves. Cleanup repeats the stop request while a timed-out spawn is
+still pending. The unit tier runs both workflow steps against a stubbed `curl`
+and `sleep`.
+
+The FSL notebook workflow records whether startup reached a valid Hub state
+before it can stop or spawn a server. Startup uses the shared Hub state
+validator to require exactly one JSON object with the user-model `name` field.
+Empty bodies and streams of multiple JSON values are invalid responses. If the
+initial state request never connects or returns only invalid responses, cleanup
+is not required and makes no DELETE or polling requests; the
+startup failure remains the authoritative result. Once a state is observed,
+cleanup remains mandatory because a later mutating request may have reached the
+Hub even if its response was lost. Checkout tests execute these lifecycle paths
+with stubbed `curl` and `sleep`.
 
 ### Lmod extension listing
 
@@ -1302,7 +1492,7 @@ checkout ownership, root refusal, and package-only sudo restrictions.
 Run the startup checks on a checkout:
 
 ```bash
-pytest tests/unit/test_startup_batching.py tests/unit/test_wait_for_jupyter.py tests/unit/test_nbi_opencode_sync.py tests/unit/test_startup_performance_fixes.py tests/unit/test_detect_resource_limits.py tests/unit/test_host_slurm_environment.py
+pytest tests/unit/test_start_notebook.py tests/unit/test_startup_batching.py tests/unit/test_wait_for_jupyter.py tests/unit/test_nbi_opencode_sync.py tests/unit/test_startup_performance_fixes.py tests/unit/test_detect_resource_limits.py tests/unit/test_host_slurm_environment.py
 ```
 
 These tests cover workspace quarantine in a single Python invocation, default
@@ -1347,6 +1537,7 @@ The installed-image suite repeats those cases against the shipped handler in
 
 The graphics acceptance profile also runs
 [`test_freebrowse_image.py`](../tests/container/test_freebrowse_image.py).
-It double-clicks a generated volume with special characters in its filename,
-checks the default factory opens an embedded FreeBrowse tab without a popup, and checks rendered
+It opens a generated volume with special characters in its filename through both factories,
+checks NiiVue is the volume default, explicitly opens an embedded FreeBrowse tab
+without a popup, and waits for the asynchronous volume URL before checking it, and checks rendered
 image pixels under `/` and `/user/alice/`.

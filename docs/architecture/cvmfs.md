@@ -4,7 +4,7 @@ description: CVMFS server selection and mount configuration, and the
   neurocommand CLI/module system for neuroimaging tools
 parent: ../architecture.md
 status: current
-last-reviewed: "2026-10-23"
+last-reviewed: "2026-11-14"
 ---
 
 # CVMFS and Neurocommand
@@ -57,7 +57,13 @@ divided by their body-transfer time. Both exclude DNS, TCP, and TLS setup,
 because the CVMFS client reuses connections. The weights are fixed and apply
 equally to every region; the measured network path decides the order.
 
-Each request has a unique query string to avoid reusing a CDN edge response.
+The candidate pool includes the Toronto Stratum 1 at
+`http://cvmfs-toronto.neurodesk.org`. Clients in Toronto select it when its
+measured workload estimate is lowest. It also appears in the image's static
+GeoAPI fallback and the daily CVMFS health-check matrix. Adding it to the pool
+invalidates cached rankings from earlier images at the next startup.
+
+Each performance request has a unique query string to avoid reusing a CDN edge response.
 This does not flush origin caches. CDN endpoints are therefore scored on their
 cold path. The client's local CVMFS cache already serves the user's own repeat
 reads. Edge hits depend on other Neurodesk users behind the same CDN location,
@@ -82,7 +88,63 @@ The four verified destinations with the lowest workload estimates become
 `CVMFS_SERVER_URL`. If the
 shortlist is entirely CDN endpoints, also test the fastest screened direct
 endpoint and retain it as a fallback if its data checks succeed. With
-`CVMFS_USE_GEOAPI=no`, the client walks this order. Runtime failover settings
+`CVMFS_USE_GEOAPI=no`, the client walks this order.
+
+A fast mirror that stops replicating keeps passing every performance and
+hash check, because it still serves its own older, self-consistent snapshot.
+Stage 1 therefore also reads each reachable destination's `.cvmfspublished`
+once at the plain URL the CVMFS client requests, without the query string. The
+cache-busted probes reach the origin, so only the plain read shows a CDN edge
+that still serves an old manifest. These reads have a three-second timeout.
+
+The reference is the newest revision that at least two distinct direct origins
+serve with the same root catalog hash. Destinations are distinct under the
+deduplication rules above. CDN endpoints are compared with the reference but
+never corroborate it. Their hostnames forward to origins the selector cannot
+identify, so an `openhtc.io` alias and its own Stratum 1 would otherwise count
+as two witnesses. One endpoint advertising a higher revision therefore cannot
+set the reference. If two direct origins disagree on the hash of the newest
+revision, there is no reference.
+
+Being behind the reference is normal while a new revision replicates, so it
+alone never changes the ranking. A destination is stale when it serves an older
+revision than the reference and either condition holds:
+
+- The reference manifest's publication time, its `T` field, is at least eight
+  hours old.
+- The destination's own `.cvmfs_last_snapshot` is at least eight hours old.
+  This cache-busted read happens only for destinations that are behind, and
+  only when the publication time does not already establish staleness.
+
+Eight hours is the age of a replica's last successful snapshot at which the
+upstream [cvmfs-servermon](https://github.com/cvmfs-contrib/cvmfs-servermon)
+`updated` test reports WARNING. CVMFS writes `.cvmfs_last_snapshot` as
+`date --utc` text after each successful snapshot. A missing, malformed, or
+future time proves nothing and leaves the destination's rank unchanged.
+
+Stale destinations still get every data check. They sort after current
+destinations at the Stage 3 shortlist, replacement, final order, and
+direct-origin fallback. A verified stale mirror therefore remains a fallback
+and is chosen first only when no current destination passes. Revision numbers
+never exclude a mirror.
+
+The check cannot detect every stale mirror:
+
+- When fewer than two direct origins are reachable, or they disagree, there is
+  no reference.
+- A mirror that lags by less than eight hours and keeps snapshotting keeps its
+  speed rank.
+- A plain read can reach a different CDN edge from the one the client later
+  uses.
+- Ages use the client's clock. A clock running behind makes references look
+  newer and reduces demotions; one running ahead can demote a lagging mirror
+  before eight hours have passed.
+- The selector does not verify manifest signatures, so two direct origins
+  serving the same forged manifest would still corroborate it. The CVMFS client
+  verifies signatures at mount time and fails over to the next listed server.
+
+The check does not guarantee detection of the lag that removed the IHEP CDN
+alias in issue #1312, whose timing is not recorded. Runtime failover settings
 (`CVMFS_LOW_SPEED_LIMIT`, `CVMFS_TIMEOUT`, `CVMFS_MAX_RETRIES`,
 `CVMFS_HOST_RESET_AFTER`) remain in
 [`config/cvmfs/default.local`](../../config/cvmfs/default.local).
@@ -100,7 +162,13 @@ At startup, the primary must complete both hash-verified samples and the
 latency requests within twice its recorded workload estimate. The first fallback
 must also complete them; a failed transfer or a fallback with an estimate more
 than 20% lower triggers a full re-ranking. The primary must also serve a
-valid manifest. Old cache formats, changed candidate pools, expired caches, and
+valid manifest. Plain manifest reads from the cached destinations run in
+parallel. A stale primary under the freshness rule above also triggers a full
+re-ranking. This check sees only the cached destinations. It needs two of them
+to be direct origins that corroborate a newer revision, so a cache of mostly
+CDN endpoints cannot detect a stale primary until the next full selection.
+A mirror that recovers is restored at the next full selection: after the
+one-day cache expires, after a failed cache check, or with `--force-probe`. Old cache formats, changed candidate pools, expired caches, and
 failed checks trigger a new benchmark. Cache contents are parsed as data, never
 executed as shell commands. Config and cache writes are atomic. Eager startup
 restores notebook ownership of the home cache path after root writes it.
@@ -114,9 +182,9 @@ that its winner will remain fastest for every object or future workload.
 
 Configuration lives in [`config/cvmfs/`](../../config/cvmfs/). CVMFS can be
 disabled with `CVMFS_DISABLE=true`. The Dockerfile pins both the CVMFS client
-package and the repository bootstrap package; the bootstrap download is also
-verified by SHA-256 so the `latest` URL cannot silently change a reproducible
-build.
+package and the repository bootstrap package. It downloads the bootstrap from
+the versioned upstream pool path and verifies it by SHA-256, so a moving
+`latest` alias cannot change or interrupt a reproducible build.
 
 The scheduled [CVMFS health workflow](../../.github/workflows/test-cvmfs.yml)
 first mounts the authoritative Stratum 0 repository and compares it with
@@ -135,11 +203,18 @@ mount with source `cvmfs2` using `findmnt`. An unavailable mount produces one
 mount-failure annotation and stops before inventory download, replica propagation
 waits, or the FSL file copy.
 The checker permits at most two read-and-mount checks within a shared
-120-second verification budget. Each command's timeout is limited by the
+180-second verification budget. Each command's timeout is limited by the
 remaining budget, reserving five seconds for kill grace and one second for
 Bash's whole-second clock rounding. A failed first check records command exit
-status and elapsed time before the second attempt. A recovered check is visible
-in the log. Both attempts use the same configured
+status and elapsed time before the second attempt. When the first repository
+read fails, the checker waits 61 seconds before the second read, because autofs
+[caches failed mounts for 60 seconds](https://man7.org/linux/man-pages/man8/automount.8.html)
+and an immediate read only replays the cached failure. After a timed-out
+read the wait is best effort: killing `ls` does not stop the autofs mount
+attempt, which can fail later and start its cache then. It skips the second
+read when the budget cannot fit that wait plus a 10-second read. A mount-type
+failure after a successful read retries immediately. A recovered check is
+visible in the log. Both attempts use the same configured
 mirror and repository; the checker does not restart autofs or change servers.
 Failure diagnostics include effective client configuration, the repository probe
 and status, autofs status and journal, and client logs. Each diagnostic has a
@@ -165,6 +240,14 @@ Each refresh has a 45-second timeout and a five-second kill grace period, uses
 noninteractive sudo when needed, and records catalog status before and after.
 A refresh failure or timeout still checks the inventory. After the final
 comparison, the checker reports every remaining omission and exits with code 2.
+
+A failing replica job reports that mirror's state on that run. It does not show
+that the mirror should leave the selector pool or the matrix: a lagging or
+briefly unreachable Stratum 1 or CDN alias normally recovers, and the incident
+closes when the original job passes again. Remove an endpoint only after a
+maintainer decides to decommission it, and keep the pool and matrix identical
+when doing so. See
+[incident repair scope](agentic-workflows.md#incident-repair-scope).
 
 The scheduled [object-storage health workflow](../../.github/workflows/test-objectstorage.yml)
 checks a validated snapshot of the same Neurocommand inventory. Each object's
@@ -201,6 +284,82 @@ fetched. The warm-up runs whenever the deferred worker does, which includes
 eager CVMFS with the default lazy Slurm. It does not run when both CVMFS and
 Slurm use eager mode.
 
+## Container kernels
+
+`neurodesk kernel` registers the Python inside a tool container as a Jupyter
+kernel, so a notebook can run with that container's libraries. The command is
+installed from
+[`config/jupyter/neurodesk_kernel.py`](../../config/jupyter/neurodesk_kernel.py):
+
+```bash
+neurodesk kernel add fsl/6.0.7.16    # or a bare tool name for its default version
+neurodesk kernel list
+neurodesk kernel remove fsl/6.0.7.16
+```
+
+`add` loads the module in a subshell to resolve its full name, so a bare tool
+name selects the default version. This works whether or not the module is
+already loaded in the calling shell. It then searches the loaded shell's `PATH`,
+in order, first for a `python3` wrapper and then for `python`. Use
+`--python COMMAND` to choose another wrapper the module provides, such as
+`fslpython`.
+
+A candidate counts only if it is a container wrapper for the requested module.
+That means a script of at most 64 KiB, starting with `#!`, whose non-comment
+lines run `neurodesk_container`, `apptainer` or `singularity` `exec` on an image
+named after the module. The image name must be exactly the module name with `/`
+replaced by `_`, then `_` and an eight-digit build date: `fsl/6.0.7.16` runs
+`fsl_6.0.7.16_20250131.simg`, and `fsl_arm64/6.0.7.23` runs
+`fsl_arm64_6.0.7.23_20261013.simg`. A prefix match is not enough:
+`amico/2.1.0` must not accept `amico_2.1.0_arm64_20250512.simg`, which belongs
+to the separate module `amico_2.1.0/arm64`. All published CVMFS modulefiles
+except the `bidstools` meta-module follow this rule; that module has no
+container of its own and is refused. Provenance comes from the
+wrapper itself, not from parsing modulefiles, because Lmod's `show` output does
+not escape quotes or brackets inside values. As a result, neither a
+dependency's container nor the image's own Python is ever registered under the
+requested module, whatever the modulefile does to `PATH`.
+
+Each wrapper is probed with a short program that reports its Python version and
+then imports `ipykernel_launcher`. A Python that runs but cannot import
+ipykernel is reported as missing ipykernel. Any other failure, such as a missing
+image or an Apptainer error, is reported as a launch failure with its last
+error line. If no wrapper can run ipykernel, `add` lists each one it checked and
+writes nothing. Nothing is installed into the container. The probe allows 10
+minutes for the first CVMFS fetch, and module resolution allows 5 minutes. Both
+run in their own session. On timeout, the session receives SIGTERM and, after a
+5-second grace period, SIGKILL. That stops the whole process tree, including
+Apptainer, the container's processes, and descendants that ignore SIGTERM.
+Filesystem errors, such as an unwritable kernels directory, are reported with
+the affected path instead of a traceback.
+
+The kernelspec goes in the user's Jupyter data directory as
+`neurodesk-<tool>-<version>`, so it persists with the home directory. Its
+display name is `Python <version> (<module>)`, and the running server lists it
+without a restart. The kernel command is `kernel_wrapper.sh` followed by the
+absolute wrapper path, `-m ipykernel_launcher` and the connection file. The
+transparent-singularity wrapper runs `neurodesk_container exec`, which owns bind
+paths, GPU, overlay and display handling. It also uses `--cleanenv`, so the
+kernel sees the container's own environment, such as FSL's `FSLDIR`, and loading
+the module at launch would add nothing. Jupyter interrupts the kernel's process
+group, which reaches the container's Python through the wrapper. A registered
+kernel needs its container path at launch, so in lazy CVMFS mode it starts once
+CVMFS is mounted.
+
+The kernelspec's `metadata.neurodesk_container` records the module and wrapper.
+`list` and `remove` act only on kernelspecs with that marker, and `remove`
+matches the exact kernel name or stored module. `add` refreshes a kernel it
+created for the same module. It refuses to replace an unmarked kernelspec, a
+symbolic link, or a kernel created for a different module whose name maps to
+the same kernel name. Writes go through a unique temporary file and an atomic
+rename, under a lock in the kernels directory that serializes concurrent
+invocations. The unit tests use a fake Lmod. `tests/container/test_container_kernels.py`
+covers, in the installed image:
+
+- a real FSL kernel, including interrupt and graceful shutdown;
+- a Tcl-only modulefile;
+- the ipykernel refusal, with evidence that the container's Python ran.
+
 ## Build-time CVMFS setup
 
 The active repository configuration is generated at startup by
@@ -236,3 +395,13 @@ Root startup repairs checkout ownership when the notebook UID or GID changes.
 It does not execute checkout code or traverse symbolic links, and skips files
 with multiple hard links. Read-only or foreign-owned HPC checkouts refuse the
 update with a permission error. The helper also refuses root execution.
+
+Container kernel readiness has a 180-second default budget, configured by
+`MappingKernelManager.kernel_info_timeout` in the image's Jupyter Server config.
+The patched documents WebSocket bridge uses the same budget, allowing cold
+CVMFS imports to finish before its readiness probe gives up. Operators can
+override the trait in server configuration or single-user server arguments.
+This bounds the initial handshake; it does not repair an already-stuck session
+or guarantee recovery when startup exceeds the budget.
+The budget also applies to upstream kernel startup and restart checks, so a
+failed restart can take up to 180 seconds to report.

@@ -4,7 +4,7 @@ description: Container-backed and hosted webapps, launcher tiles and icons,
   and the build-time Jupyter config generation that wires them up
 parent: ../architecture.md
 status: current
-last-reviewed: "2026-09-21"
+last-reviewed: "2026-11-11"
 ---
 
 # Webapp System
@@ -32,18 +32,33 @@ their own request-size and multipart limits before the wrapper receives a
 request. Container-backed webapps launch through
 [`config/jupyter/webapp_launcher.sh`](../../config/jupyter/webapp_launcher.sh) and
 use Unix sockets such as `/tmp/neurodesk_webapp_{name}.sock` to avoid port
-conflicts. Entries with `direct_url` open the hosted application directly from
-the Neurodesk launcher. Launcher tile icons for those entries are checked-in
-SVG or PNG files in
-[`config/jupyter/webapp_icons/`](../../config/jupyter/webapp_icons/) referenced from
-`webapp_links.json` with `/opt/neurodesk/icons/*` paths; the Dockerfile copies
-them into the image before Jupyter config generation. The custom Neurodesk
+conflicts. The wrapper creates each socket mode `0600`; only the notebook user
+and its Jupyter Server Proxy can connect, so another user on a shared host
+cannot bypass Jupyter authentication through the local proxy. Entries with
+`direct_url` open the hosted application directly from the Neurodesk launcher.
+Launcher tile icons for retained container-backed entries are downloaded from
+the URLs in neurocommand's catalog during Jupyter config generation. The local
+catalog entry uses the installed Neurodesk brain icon. The custom Neurodesk
 launcher reads icons through the server-proxy icon endpoint and wraps raster
 images as SVGs for JupyterLab `LabIcon` support.
 The Webapps section heading uses the same icon as the More webapps tile.
 The launcher copies the rendered catalog SVG into the heading after React
 updates, retaining the heading dimensions. The catalog has the last launcher
 rank and a final CSS order so it stays after local apps when tiles refresh.
+
+The Neurodesk section includes a **Getting started** tile that opens the
+[Accessing Tools in Neurodesk](https://neurodesk.org/edu/tutorials/about-neurodesk/accessing-neurodesk-tools)
+tutorial as a notebook inside JupyterLab. On first use it downloads
+`accessing_neurodesk_tools.ipynb` from the `main` branch of
+[neurodesk/neurodeskedu](https://github.com/neurodesk/neurodeskedu) into
+`neurodesk-getting-started/` under the Jupyter server root. The book resolves
+root-relative image paths such as `/static/...` against its `books/` directory,
+so the copy rewrites those Markdown and `<img>` paths to the matching
+`raw.githubusercontent.com` URLs. Later clicks open
+that copy without downloading again, so the user's edits and outputs are kept.
+If the download fails, a notification reports the error. It follows the server-proxy tiles and precedes
+the terminal. The launcher registers it before requesting server-proxy metadata,
+so it remains available if that request fails.
 
 The Neurodesk Slurm tile invokes `jupyterlab-slurm:open`, the command supplied
 by the pinned NERSC extension. Its label and icon come from that command;
@@ -99,9 +114,11 @@ it tracking `origin/main` so the runtime Update launcher can use
 
 The image builds [Neurodesk's FreeBrowse fork](https://github.com/neurodesk/freebrowse/tree/main/jupyter)
 from the commit pinned by `FREEBROWSE_REF` in the Dockerfile. Double-clicking
-`.nii`, `.nii.gz`, or `.nvd` files opens FreeBrowse in a JupyterLab document tab.
+`.nii` or `.nii.gz` files opens Korbinian Eckstein's NiiVue viewer
+(`jupyterlab-niivue`). FreeBrowse remains available through **Open With**;
+`.nvd` documents still open in FreeBrowse by default.
 The file browser also offers **Open in FreeBrowse** in its context menu.
-FreeBrowse replaces `jupyterlab-niivue` as the default document viewer;
+The build limits FreeBrowse's default registration to `.nvd` documents;
 `ipyniivue` remains available in notebooks.
 
 The serverless frontend is built with upstream's `build:jupyter` target and

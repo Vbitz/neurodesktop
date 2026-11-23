@@ -1,6 +1,7 @@
 import subprocess
 import sys
 import inspect
+import ipaddress
 import os
 import grp
 import pwd
@@ -20,6 +21,7 @@ import pytest
 import websocket
 from native_desktop_driver import start_display
 from rdp_keyboard_target import RdpKeyboardTarget
+from testlib import GuacamoleInstructions, guacamole_instruction
 
 
 def run_cmd(cmd):
@@ -65,6 +67,33 @@ def _wait_for_tcp_port(port, timeout_seconds=30, host="127.0.0.1"):
             sock.close()
 
     raise AssertionError(f"TCP port {port} did not open on {host}: {last_error}")
+
+
+def _tcp_listener_hosts(port):
+    """Return listening hosts for port, folding IPv4-mapped IPv6 to IPv4.
+
+    Java binds 127.0.0.1 on a dual-stack socket, which ss reports as
+    [::ffff:127.0.0.1]; wildcard binds stay distinguishable (*, [::]).
+    """
+    result = subprocess.run(
+        ["ss", "-H", "-lnt"], capture_output=True, text=True, check=True
+    )
+    hosts = []
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        host, _, listen_port = fields[3].rpartition(":")
+        if listen_port != str(port):
+            continue
+        host = host.strip("[]").split("%", 1)[0]
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            hosts.append(host)
+            continue
+        hosts.append(str(getattr(address, "ipv4_mapped", None) or address))
+    return hosts
 
 
 def _read_runtime_port(home_dir, name, default):
@@ -420,7 +449,9 @@ def _open_guacamole_tunnel(port, token, data_source, connection_id, width=1280, 
     return tunnel
 
 
-def _collect_guacamole_desktop_frames(tunnel, timeout_seconds=30):
+def _collect_guacamole_desktop_frames(
+    tunnel, timeout_seconds=30, stable_seconds=3, parser=None
+):
     """Wait for real desktop pixels and reject any Guacamole error frames.
 
     Guacamole sends a .sync instruction as a handshake ack before the backend
@@ -438,34 +469,41 @@ def _collect_guacamole_desktop_frames(tunnel, timeout_seconds=30):
     deadline = time.time() + timeout_seconds
     frames = []
     saw_pixels = False
+    parser = parser or GuacamoleInstructions()
+    next_keepalive = 0.0
 
     while time.time() < deadline:
+        if time.monotonic() >= next_keepalive:
+            tunnel.send("3.nop;")
+            next_keepalive = time.monotonic() + 2
         try:
             frame = tunnel.recv()
         except websocket.WebSocketTimeoutException:
-            if saw_pixels:
-                # Backend rendered at least once; idle frames are fine.
-                return frames
             continue
         except Exception as error:  # pragma: no cover - unexpected tunnel death
-            frames.append(f"<tunnel recv failed: {error}>")
-            break
+            raise AssertionError("Guacamole tunnel closed before observation finished") from error
 
         frames.append(frame)
+        if not frame:
+            raise AssertionError("Guacamole tunnel closed before observation finished")
         if not isinstance(frame, str):
             continue
+        instructions = parser.feed(frame)
+        for instruction in instructions:
+            if instruction[0] == "sync":
+                tunnel.send(guacamole_instruction(*instruction))
 
-        if ".error," in frame:
+        if any(instruction[0] == "error" for instruction in instructions):
             raise AssertionError(
                 f"Guacamole tunnel returned an error frame: {frame!r}\n"
                 f"All frames: {frames}"
             )
-        if any(op in frame for op in (".img,", ".png,", ".jpeg,")):
+        if not saw_pixels and any(instruction[0] in {"img", "png", "jpeg"} for instruction in instructions):
             saw_pixels = True
             # Give the backend a moment to flush a few more frames so the test
             # can demonstrate a stable session (not just a single flash before
             # disconnect).
-            deadline = min(deadline, time.time() + 3)
+            deadline = time.time() + stable_seconds
 
     if not saw_pixels:
         raise AssertionError(
@@ -1068,6 +1106,7 @@ def test_guac_api_connections():
     tomcat_port = process.tomcat_port
     try:
         _guacamole_ready(tomcat_port, home_dir=home_dir, process=process)
+        assert _tcp_listener_hosts(tomcat_port) == ["127.0.0.1"]
         _guacd_port = _read_runtime_port(home_dir, "guacd_port", default=4822)
         _wait_for_tcp_port(_guacd_port)
 
@@ -1114,22 +1153,28 @@ def test_guac_login_rejects_legacy_default_password():
         _cleanup_guacamole_process(process, home_dir=home_dir, guacamole_home=guacamole_home)
 
 
-@pytest.mark.parametrize("sftp_config", ["default", "wildcard", "include"])
+@pytest.mark.parametrize("sftp_config", ["default", "legacy-session", "wildcard", "include"])
 def test_vnc_backends_bind_localhost_only(sftp_config, monkeypatch):
     """VNC and its SFTP side-channel must be reachable only on loopback."""
     monkeypatch.setenv("NEURODESKTOP_DISABLE_SSH", "false")
     nb_user, home_dir, _, guacamole_home = _prepare_guacamole_runtime()
-    if sftp_config != "default":
-        ssh_dir = Path(home_dir) / ".ssh"
-        config = Path("/opt/jovyan_defaults/.ssh/sshd_config").read_text()
-        config = config.replace("/home/jovyan", home_dir)
+    ssh_dir = Path(home_dir) / ".ssh"
+    config = Path("/opt/jovyan_defaults/.ssh/sshd_config").read_text()
+    config = config.replace("/home/jovyan", home_dir)
+    config = f'AuthorizedKeysFile "{ssh_dir / "authorized_keys"}"\n' + config
+    if sftp_config == "legacy-session":
+        config = config.replace("DisableForwarding yes", "DisableForwarding no")
+        config = config.replace("ForceCommand internal-sftp", "ForceCommand /bin/sh")
+        config = config.replace("PermitTTY no", "PermitTTY yes")
+        config = config.replace("X11Forwarding no", "X11Forwarding yes")
+    elif sftp_config != "default":
         unsafe_listeners = "ListenAddress 0.0.0.0\nListenAddress ::\n"
         if sftp_config == "include":
             included_config = ssh_dir / "listeners.conf"
             included_config.write_text(unsafe_listeners)
             unsafe_listeners = f'Include "{included_config}"\n'
         config = config.replace("ListenAddress 127.0.0.1\n", unsafe_listeners)
-        (ssh_dir / "sshd_config").write_text(config)
+    (ssh_dir / "sshd_config").write_text(config)
     process = _start_guacamole_as_user(nb_user, home_dir, guacamole_home, backend="vnc")
     try:
         _guacamole_ready(process.tomcat_port, home_dir=home_dir, process=process)
@@ -1172,21 +1217,33 @@ def test_vnc_backends_bind_localhost_only(sftp_config, monkeypatch):
         assert listen_addresses == [f"127.0.0.1:{sftp_port}"], \
             f"SFTP sshd must bind IPv4 loopback only; listen addresses were {listen_addresses}"
 
-        if sftp_config != "default":
-            source = Path(home_dir) / "sftp-probe.txt"
-            downloaded = Path(home_dir) / "sftp-downloaded.txt"
-            source.write_text("Guacamole SFTP loopback probe\n")
-            transfer = subprocess.run(
-                ["sftp", "-b", "-", "-P", str(sftp_port),
-                 "-i", str(Path(home_dir) / ".ssh/guacamole_rsa"),
-                 "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
-                 "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-                 f"{nb_user}@127.0.0.1"],
-                input=f'get "{source}" "{downloaded}"\n',
-                capture_output=True, text=True, timeout=30,
-            )
-            assert transfer.returncode == 0, transfer.stdout + transfer.stderr
-            assert downloaded.read_text() == "Guacamole SFTP loopback probe\n"
+        source = Path(home_dir) / "sftp-probe.txt"
+        downloaded = Path(home_dir) / "sftp-downloaded.txt"
+        identity = str(Path(home_dir) / ".ssh/guacamole_rsa")
+        connection_options = [
+            "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+            "-o", "IdentityAgent=none", "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+        ]
+        source.write_text("Guacamole SFTP loopback probe\n")
+        transfer = subprocess.run(
+            ["sftp", "-b", "-", "-P", str(sftp_port), "-i", identity,
+             *connection_options, f"{nb_user}@127.0.0.1"],
+            input=f'get "{source}" "{downloaded}"\n',
+            capture_output=True, text=True, timeout=30,
+        )
+        assert transfer.returncode == 0, transfer.stdout + transfer.stderr
+        assert downloaded.read_text() == "Guacamole SFTP loopback probe\n"
+
+        # The same key is deliberately sufficient for Guacamole file transfer,
+        # but it must not provide an interactive or command-execution channel.
+        shell = subprocess.run(
+            ["ssh", "-T", "-p", str(sftp_port), "-i", identity,
+             *connection_options, f"{nb_user}@127.0.0.1", "printf", "shell-open"],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert shell.returncode != 0, shell.stdout + shell.stderr
+        assert "shell-open" not in shell.stdout
     finally:
         _cleanup_guacamole_process(process, home_dir=home_dir, guacamole_home=guacamole_home)
 
@@ -1334,7 +1391,10 @@ def test_guac_vnc_tunnel(scenario, monkeypatch):
             vnc_connection_id,
         )
         try:
-            _collect_guacamole_desktop_frames(tunnel, timeout_seconds=30)
+            _collect_guacamole_desktop_frames(
+                tunnel, timeout_seconds=45,
+                stable_seconds=20 if scenario == "ssh-disabled-both" else 3,
+            )
         except AssertionError as exc:
             # Pull the Guacamole log so we can see whether the failure was an
             # auth rejection, a connection refused, or something downstream.
@@ -1346,16 +1406,10 @@ def test_guac_vnc_tunnel(scenario, monkeypatch):
             _, vnc_tail = run_cmd(
                 f"ls -t {shlex.quote(vnc_logs)}/*:*.log 2>/dev/null | head -n1 | xargs -I {{}} tail -n 80 {{}}"
             )
-            vnc_block = "(mapping had no vnc connection)"
-            # Find the <connection> block that contains <protocol>vnc</protocol>.
-            for m in re.finditer(r'<connection[^>]*>[\s\S]*?</connection>', mapping_text):
-                if "<protocol>vnc</protocol>" in m.group(0):
-                    vnc_block = m.group(0)
-                    break
             raise AssertionError(
                 f"{exc}\n--- catalina.out tail ---\n{extra}\n"
                 f"--- latest Xvnc log ---\n{vnc_tail}\n"
-                f"--- mapping VNC entry ---\n{vnc_block}"
+                f"--- expected VNC port ---\n{mapping_vnc_port}"
             ) from exc
     finally:
         if tunnel is not None:
@@ -1410,18 +1464,22 @@ def test_guac_rdp_tunnel():
             auth_response["dataSource"],
             rdp_connection_id,
         )
-        _collect_guacamole_desktop_frames(tunnel)
+        _collect_guacamole_desktop_frames(tunnel, parser=keyboard_target.instructions)
         keyboard_target.wait(tunnel)
 
         def key(keysym, pressed):
             value = str(keysym)
             tunnel.send(f"3.key,{len(value)}.{value},1.{int(pressed)};")
 
-        key(65513, True)
-        key(65471, True)
-        key(65471, False)
-        key(65513, False)
-        keyboard_target.wait(tunnel, run_dialog=True, timeout_seconds=10)
+        def open_run_dialog():
+            key(65513, True)
+            key(65471, True)
+            key(65471, False)
+            key(65513, False)
+
+        keyboard_target.wait(
+            tunnel, run_dialog=True, timeout_seconds=10, trigger=open_run_dialog,
+        )
         output = Path(home_dir) / "rdp-command.txt"
         assert not output.exists(), "RDP command output must be new for this session"
         command = "sh -c " + shlex.quote(

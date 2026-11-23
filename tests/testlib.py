@@ -10,6 +10,9 @@ Both tiers resolve their subject through the helpers here so that no test has to
 know which layout it is running in.
 """
 
+from contextlib import ExitStack, contextmanager
+import socket
+
 import importlib.util
 import os
 import subprocess
@@ -125,3 +128,68 @@ def run_cmd(cmd, cwd=None, env=None, timeout=None):
         timeout=timeout,
     )
     return process.returncode, process.stdout.strip()
+
+
+def run_cmd_streams(cmd, cwd=None, env=None, timeout=None):
+    """Run *cmd* and return ``(exit_code, stdout, stderr)`` separately.
+
+    Use this when a command's stdout is the value under test and stderr may
+    contain diagnostics that must not change that value.
+    """
+    merged_env = None
+    if env is not None:
+        merged_env = os.environ.copy()
+        merged_env.update(env)
+    process = subprocess.run(
+        cmd,
+        shell=True,
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        env=merged_env,
+        timeout=timeout,
+    )
+    return process.returncode, process.stdout.strip(), process.stderr.strip()
+
+
+@contextmanager
+def reserved_tcp_ports(count):
+    """Hold distinct loopback ports until callers close them or the scope exits."""
+    with ExitStack() as stack:
+        reservations = []
+        for _ in range(count):
+            sock = stack.enter_context(socket.socket())
+            sock.bind(("127.0.0.1", 0))
+            reservations.append(sock)
+        yield reservations
+
+
+class GuacamoleInstructions:
+    """Decode length-prefixed instructions across WebSocket message boundaries."""
+
+    def __init__(self):
+        self.buffer = ""
+        self.elements = []
+
+    def feed(self, text):
+        self.buffer += text
+        instructions = []
+        while "." in self.buffer:
+            dot = self.buffer.index(".")
+            length = int(self.buffer[:dot])
+            end = dot + 1 + length
+            if len(self.buffer) <= end:
+                break
+            separator = self.buffer[end]
+            if separator not in ",;":
+                raise ValueError("Invalid Guacamole element separator")
+            self.elements.append(self.buffer[dot + 1:end])
+            self.buffer = self.buffer[end + 1:]
+            if separator == ";":
+                instructions.append(self.elements)
+                self.elements = []
+        return instructions
+
+
+def guacamole_instruction(*elements):
+    return ",".join(f"{len(element)}.{element}" for element in elements) + ";"

@@ -97,7 +97,7 @@
       "enabled": false
     },
     {
-      "description": "Not dependencies: the local viewer package and Notebook Intelligence, held at 5.3.1 because 5.4.0 conflicts with the ACP client (scripts/audit_image_versions.py).",
+      "description": "Not dependencies: the local viewer package and Notebook Intelligence, whose build-time bundle patch is re-verified by hand on each bump (config/agents/patch_nbi.py).",
       "matchDepNames": [
         "neurodesk-astra-view",
         "notebook-intelligence"
@@ -138,6 +138,13 @@
         "jupyter-server-mcp"
       ],
       "allowedVersions": "<0.4.0"
+    },
+    {
+      "description": "Hold: Jupyter AI 3.2 requires jupyter-ai-persona-manager>=0.2.0,<0.3.0.",
+      "matchDepNames": [
+        "jupyter-ai-persona-manager"
+      ],
+      "allowedVersions": "<0.3.0"
     },
     {
       "description": "Hold: Jupyter AI 3.2 requires jupyterlab-commands-toolkit>=0.2.0,<0.3.0.",
@@ -302,7 +309,7 @@
       "groupName": "javascript lint tools"
     },
     {
-      "description": "T3 Code server manifest, Dockerfile ARG and tests move together.",
+      "description": "T3 Code server Dockerfile ARG and tests move together.",
       "matchDepNames": [
         "t3"
       ],
@@ -351,6 +358,7 @@
       "matchDepNames": [
         "tailscale/tailscale",
         "cloudflare/cloudflared",
+        "t3",
         "lightcone-cli",
         "cvmfs-release",
         "JuliaBinaryWrappers/strace_jll.jl"
@@ -821,6 +829,18 @@
       "datasourceTemplate": "pypi"
     },
     {
+      "description": "Brotli decoder security floor pinned exactly.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^Dockerfile$/"
+      ],
+      "matchStrings": [
+        "ARG BROTLI_VERSION=\\\\?\"?(?<currentValue>\\d[^\"\\\\\\s]*)\\\\?\"?"
+      ],
+      "depNameTemplate": "brotli",
+      "datasourceTemplate": "pypi"
+    },
+    {
       "description": "PyJWT security floor pinned exactly.",
       "customType": "regex",
       "managerFilePatterns": [
@@ -1005,17 +1025,18 @@
       "datasourceTemplate": "npm"
     },
     {
-      "description": "T3 Code server: Dockerfile ARG plus the unit and container tests that read it back (config/agents/t3-code/package.json is handled by the npm manager).",
+      "description": "T3 Code server release archive: Dockerfile ARG plus the unit and container tests that read it back (both T3_CODE_*_SHA256 ARGs need a manual refresh).",
       "customType": "regex",
       "managerFilePatterns": [
         "/^Dockerfile$/",
         "/^tests/unit/test_t3_code_server\\.py$/",
-        "/^tests/container/test_t3_code_server_image\\.py$/"
+        "/^tests/container/test_t3_code_server_image\\.py$/",
+        "/^tests/container/test_t3_ollama\\.py$/"
       ],
       "matchStrings": [
         "ARG T3_CODE_VERSION=\\\\?\"?(?<currentValue>\\d[^\"\\\\\\s]*)\\\\?\"?",
-        "package\\[\"dependencies\"\\]\\[\"t3\"\\] == \"(?<currentValue>[^\"]+)\"",
-        "== \"t3 v(?<currentValue>[^\"]+)\""
+        "== \"t3 v(?<currentValue>[^\"]+)\"",
+        "\\[\"serverVersion\"\\] == \"(?<currentValue>[^\"]+)\""
       ],
       "depNameTemplate": "t3",
       "datasourceTemplate": "npm"
@@ -1143,6 +1164,7 @@
       ],
       "matchStrings": [
         "@openai/codex@(?<currentValue>\\d+\\.\\d+\\.\\d+)",
+        "codex-cli (?<currentValue>\\d+\\.\\d+\\.\\d+)",
         "neurodesktop-agentic:codex-(?<currentValue>\\d+\\.\\d+\\.\\d+)",
         "pins Codex CLI `(?<currentValue>\\d+\\.\\d+\\.\\d+)`"
       ],

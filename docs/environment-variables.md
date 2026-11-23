@@ -4,7 +4,7 @@ description: Reference for runtime environment variables and Dockerfile build
   arguments supported by Neurodesktop
 parent: index.md
 status: current
-last-reviewed: "2026-10-23"
+last-reviewed: "2026-11-09"
 ---
 
 # Environment Variables
@@ -36,6 +36,14 @@ The session home is `/home/kasm-user`; persist that path instead of overriding
 - `LMOD_AVAIL_EXTENSIONS`: defaults to `no`, hiding the extension inventory
   from `ml av` and `module avail`. Set to `yes` to show it again. Module
   loading and `module spider` searches are unchanged.
+- `LMOD_PACKAGE_PATH`: set by the image to `/opt/neurodesktop/lmod`, whose
+  `SitePackage.lua` records Neurodesk module loads for `neurodesk cite`.
+  Replacing it disables that recording. See
+  [Tool citations](architecture/citations.md).
+- `NEURODESKTOP_CITE_CATALOGUE_URL`: application catalogue that
+  `neurodesk cite` fetches, in the neurocontainers `apps.json` format; defaults
+  to `https://apps-json.scigetorg.workers.dev/neuroimaging/apps.json` (mainly
+  for testing)
 - `NEURODESKTOP_LMOD_CACHE_WARMUP`: defaults to `1`, building the notebook
   user's Lmod module cache in the background after CVMFS mounts so the first
   `ml av` does not fetch every modulefile. Set to `0` to skip it, for example
@@ -200,6 +208,15 @@ for RDP initialization and VS Code isolation.
   `NEURODESKTOP_VNC_PORT`, `NEURODESKTOP_SFTP_PORT`:
   port overrides for the desktop stack; by default each is allocated
   automatically starting from its conventional port
+- `NEURODESKTOP_VOXL_RESIZE_SCALE`: desktop pixels per CSS pixel of the
+  viewer's window in the
+  [voxl desktop](architecture/desktop.md#voxl-desktop-streaming); defaults to
+  `1`. Use `2` for HiDPI displays. A viewer can override it for one page with
+  `?scale=` in the URL. The launcher refuses values that are not positive numbers
+- `NEURODESKTOP_VOXL_SCREEN_SIZE`: largest voxl desktop, as `WIDTHxHEIGHT`;
+  defaults to `3840x2160`. Xvfb starts at this size and voxl shrinks the
+  screen to fit the viewer, never beyond it. Larger sizes enlarge the shared
+  framebuffer and the encoder's work
 - `NEURODESKTOP_RUNTIME_DIR`: base directory for per-backend Guacamole,
   Tomcat, and runtime state; defaults under `~/.neurodesk`
 - `NEURODESKTOP_GUACAMOLE_USER`, `NEURODESKTOP_GUACAMOLE_PASSWORD`,
@@ -241,6 +258,9 @@ T3 starts automatically with Jupyter as the notebook user.
   Public Hub URLs take precedence over the remembered authenticated request
   hostname. Outside JupyterHub, T3 keeps its normal hostname fallback. An
   explicit `/etc/machine-info` pretty hostname remains T3's first choice.
+- `NEURODESKTOP_T3_CODE_STARTUP_TIMEOUT`: seconds each start attempt may take
+  before T3 answers HTTP; defaults to `120`. Accepts values above `0` up to
+  `3600`. Raise it on hosts where heavy user activity slows the first start.
 - `NEURODESKTOP_T3_CODE_HOME`: persistent T3 data directory; defaults to
   `~/.t3`
 - `NEURODESKTOP_T3_CODE_WORKDIR`: initial project directory; defaults to the
@@ -248,7 +268,7 @@ T3 starts automatically with Jupyter as the notebook user.
 - `NEURODESKTOP_T3_CODE_EXECUTABLE`,
   `NEURODESKTOP_T3_CODE_PROVIDER_BIN`: installed server and quiet provider
   directory overrides. These are intended for image tests and development.
-  The defaults are `/opt/t3-code/node_modules/.bin/t3` and
+  The defaults are `/opt/t3-code/t3` and
   `/opt/neurodesktop/t3-provider-bin`.
 
 See [T3 Code remote access](architecture/t3-code.md) for the Docker and T3
@@ -286,7 +306,8 @@ Connect procedures.
 - `BASH_ENV`: agent launchers set this to
   `/opt/neurodesktop/agent_bash_env.sh` for noninteractive Bash tool shells.
   `NEURODESKTOP_PREVIOUS_BASH_ENV` retains the caller's initializer, which runs
-  before Neurodesk's module setup. Retained Slurm scripts source the shared
+  before Neurodesk's module setup. An unreadable initializer, such as a host
+  path that Apptainer passes into the container, is skipped. Retained Slurm scripts source the shared
   initializer explicitly, including when job environment export is disabled.
 - `CODEX_PATH`, `CLAUDE_CODE_EXECUTABLE`: executable paths used by the Jupyter
   AI ACP adapters. They default to quiet selectors under `/opt/neurodesktop/`.
@@ -326,8 +347,8 @@ Connect procedures.
 - `NEURODESKTOP_OPENCODE_PRUNE_SESSIONS`: set to `0` (or `false`/`no`/`off`)
   to disable an explicit invocation of the manual recovery tool
   `/opt/neurodesktop/opencode_prune_sessions.py`. Container startup never runs
-  the tool automatically. Without `--apply` it reports sessions whose working
-  directory has been deleted; with `--apply` it drops them from
+  the tool automatically. Without `--apply` it reports sessions and projects
+  whose directory has been deleted; with `--apply` it drops them from
   `~/.local/share/opencode/opencode.db`, writes a single rolling
   `opencode.db.prune-backup`, and runs `VACUUM`. Sessions whose whole parent
   tree is missing are left alone, so an unmounted volume is not mistaken for a
@@ -340,12 +361,13 @@ Exact pins for the image build. The default values below are the declared
 pins in the [`Dockerfile`](../Dockerfile) at the time this page was last
 reviewed; the Dockerfile itself is authoritative.
 
-- `OPENCODE_VERSION`: the OpenCode release installed into
-  the image; defaults to the validated pin in the Dockerfile (currently
-  `1.19.3`). Override to bump the pin, or set it to an empty value to
+- `OPENCODE_VERSION`: the OpenCode 2 release installed into
+  the image from OpenCode's `/v2/install` script; defaults to the validated pin
+  in the Dockerfile (currently `2.2.5`). That installer accepts only 2.x
+  versions. Override to bump the pin, or set it to an empty value to
   install the latest release
 - `CLAUDE_CODE_VERSION`: exact Claude Code native release installed as the
-  image fallback; defaults to `2.1.302`. The direct-version audit compares the
+  image fallback; defaults to `2.1.316`. The direct-version audit compares the
   pin with the official `@anthropic-ai/claude-code` release stream
 - `CVMFS_VERSION`: exact Ubuntu CVMFS client package version;
   defaults to `2.14.1+ubuntu26.04`
@@ -360,18 +382,21 @@ reviewed; the Dockerfile itself is authoritative.
   `ANYWIDGET_VERSION`, `LIGHTCONE_CLI_VERSION`, `LIGHTCONE_CLI_SHA256`: exact
   `pip`, `certifi`, `uv`,
   ASTRA CLI/schema, viewer runtime, and isolated Lightcone CLI releases
-  installed in the image; defaults to `26.2.2`, `2026.10.19`, `0.13.4`, `0.2.18`,
+  installed in the image; defaults to `26.2.2`, `2026.10.23`, `0.13.6`, `0.2.18`,
   `0.0.14`, `0.11.0`, `0.5.0`, and the verified SHA-256 of that Lightcone
   source archive. The `pip`, `certifi`, and `uv` pins exclude compromised
   emSign G3 trust paths from their bundled CA stores
 - `SNAKEMAKE_VERSION`: user-facing Snakemake workflow release; defaults to
-  `9.27.0` in an isolated tool environment. Its metadata requires
+  `9.27.1` in an isolated tool environment. Its metadata requires
   `packaging<26`, so that environment holds `packaging` at `25.0`.
   The main Python environment retains Conda's compatible `packaging` release
 - `PYJWT_VERSION`: exact PyJWT release installed into the main Python
   environment; defaults to `2.15.1`. It retains the rejection of non-canonical
   public-key PEM encodings introduced in `2.14.0`, preventing their reuse as
   HMAC secrets (CVE-2026-102268)
+- `BROTLI_VERSION`: exact Brotli Python release that replaces the base image's
+  Conda build in the main Python environment; defaults to `1.2.1`, which fixes
+  the decoder out-of-bounds write in `1.2.0` (GHSA-9v8h-qqgm-4m35)
 - `AGENT_SKILLS_REF`: exact commit of
   `LightconeResearch/agent-skills` used for the Codex and Claude reproduction
   plugin and OpenCode's copied skills and hook adapter;
@@ -383,26 +408,26 @@ reviewed; the Dockerfile itself is authoritative.
   Collaboration pinned alongside it
 - `CODEX_ACP_VERSION`, `CLAUDE_AGENT_ACP_VERSION`: pinned
   ACP adapters that expose the Codex and Claude personas in Jupyter AI;
-  defaults to `2.2.2` and `0.92.0`. They install without their vendored agent
+  defaults to `2.6.0` and `0.99.1`. They install without their vendored agent
   binaries and drive the selected user or image CLIs through `CODEX_PATH` and
   `CLAUDE_CODE_EXECUTABLE` (runtime variables exported by
   `environment_variables.sh`)
 - `CODEX_CLI_VERSION`: the `@openai/codex` CLI release
-  installed globally; defaults to `0.163.0`. Upgrades must pass the real T3 and
+  installed globally; defaults to `0.167.0`. Upgrades must pass the real T3 and
   ACP initialization probes. This release exceeds the pinned ACP adapter's
-  declared `^0.160.1` dependency range. The image deliberately uses its
+  declared `^0.166.0` dependency range. The image deliberately uses its
   global CLI after removing the adapter's bundled executable; installed-image
   ACP and T3 initialization probes must validate this exception.
   A user can install a newer release with `codex update`
 - `T3_CLOUDFLARED_VERSION`: the relay client release bundled for guided T3 Connect
-  linking; defaults to `2026.10.1` and uses T3's supported executable override. Update
+  linking; defaults to `2026.10.7` and uses T3's supported executable override. Update
   both architecture SHA-256 values in `Dockerfile` whenever this version changes.
-- `T3_CODE_VERSION`: the headless T3 Code server release installed from the
-  checked manifest; defaults to `0.1.0`. The release ships one self-contained
-  executable per platform, so the layer installs no lockfile and compiles
-  nothing
+- `T3_CODE_VERSION`: the headless T3 Code server release installed from its
+  GitHub release archive; defaults to `0.1.5`. Update `T3_CODE_AMD64_SHA256`
+  and `T3_CODE_ARM64_SHA256` together with the version, using the release's
+  `SHA256SUMS`. Each archive is self-contained, so the layer compiles nothing
 - `TAILSCALE_VERSION`: static Tailscale CLI and daemon release; defaults to
-  `1.104.1`. Update `TAILSCALE_AMD64_SHA256` and `TAILSCALE_ARM64_SHA256`
+  `1.104.4`. Update `TAILSCALE_AMD64_SHA256` and `TAILSCALE_ARM64_SHA256`
   together with the version, using the official archive checksums. Installation
   does not start or authenticate the daemon; see
   [manual userspace setup](architecture/t3-code.md#connect-through-tailscale-inside-the-container).
@@ -412,14 +437,14 @@ reviewed; the Dockerfile itself is authoritative.
   `3bf11cb7b271b554998105a11e6c9b8c3e376615`
 - `MYST_PNPM_VERSION`, `MYST_YDOC_VERSION`: pnpm and Jupyter
   YDoc releases used for the MyST/RISE compatibility rebuild; defaults to
-  `11.28.6` and `4.1.1`
+  `11.28.10` and `4.2.0`
 - `APPTAINER_VERSION`, `APPTAINER_GO_VERSION`, `APPTAINER_GRPC_VERSION`,
   `APPTAINER_CRYPTO_VERSION`: Apptainer source release and the Go
   toolchain/grpc/crypto module versions used in its dedicated build stage;
-  defaults to `1.5.4`, `1.27.2`, `1.84.0`, and `0.58.0`. The crypto override
+  defaults to `1.5.5`, `1.27.3`, `1.85.0`, and `0.58.0`. The crypto override
   also updates the separately vendored gocryptfs build.
 - `BASE_IMAGE_TAG`: tag of the upstream Jupyter Docker base image; defaults to
-  the multi-architecture `2026-10-18` release
+  the multi-architecture `2026-10-28` release
 - `NPM_VERSION`: npm release installed with the runtime Node.js distribution;
   defaults to `12.2.1`
 - `FREEBROWSE_REF`: exact FreeBrowse source commit used to build the default
@@ -436,7 +461,14 @@ reviewed; the Dockerfile itself is authoritative.
   VirtualGL release and architecture-specific Debian package checksums.
   The version defaults to `3.1.5`; update its verified checksums together with
   the version. GPU rendering remains an explicit application launch choice.
-- `CODE_SERVER_VERSION`: code-server release; defaults to `4.141.0`
+- `VOXL_VERSION`: `voxl-server` crate release built for the
+  [voxl desktop streaming](architecture/desktop.md#voxl-desktop-streaming);
+  defaults to `0.3.4`. The build stage compiles it with `--locked` against the
+  base image's distro x264, libyuv, Opus and PulseAudio libraries. The same
+  stage rebuilds the distro Xvfb with voxl's scroll-axis patch; update
+  `config/voxl/xorg-server-xtest-scroll.patch` from the new release's
+  `patches/` directory with the version
+- `CODE_SERVER_VERSION`: code-server release; defaults to `4.144.0`
 - `SHELL_QUOTE_VERSION`: shell-quote release for VS Code's nested package;
   defaults to `1.12.0`
 - `PROXY_ADDR_VERSION`: proxy-addr release for code-server's npm dependency

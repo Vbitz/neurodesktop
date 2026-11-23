@@ -1,7 +1,10 @@
-FROM node:24.22.0-bookworm-slim AS node
-RUN npm install --global @openai/codex@0.162.1 && npm cache clean --force
+FROM node:24.22.3-bookworm-slim AS node
+RUN npm install --global @openai/codex@0.168.0 \
+    && codex_installed_version="$(codex --version)" \
+    && test "$codex_installed_version" = "codex-cli 0.168.0" \
+    && npm cache clean --force
 
-FROM python:3.15.0-slim-bookworm
+FROM python:3.15.2-slim-bookworm
 ARG WORKER_UID=1000
 ARG WORKER_GID=1000
 RUN (getent group "$WORKER_GID" || groupadd --gid "$WORKER_GID" codex) \
@@ -17,14 +20,14 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
        gcc libc6-dev libx11-dev xvfb x11-xserver-utils \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir pytest==8.4.2 httpx==0.28.1 traitlets==5.16.1 \
-       PyYAML==6.0.3 jupyter-server==2.21.1 jupyter-server-proxy==4.6.0 \
+       PyYAML==6.0.3 jupyter-server==2.21.1 jupyter-server-proxy==4.6.1 \
        astra-spec==0.0.14 astra-tools==0.2.18 anywidget==0.11.0 \
        jupyterhub==6.1.0 requests==2.34.2 ipykernel==7.4.0 websocket-client==1.9.2 \
-       nibabel==5.4.2 numpy==2.5.4
+       nibabel==5.4.2 numpy==2.5.5
 RUN npm install --prefix /opt/launcher-dom --no-audit --no-fund \
        jsdom@26.1.0 typescript@5.9.3 esbuild@0.28.2 \
-       @jupyterlab/docregistry@4.6.4 @jupyterlab/coreutils@6.6.4 \
-       @jupyterlab/services@7.6.4 @lumino/widgets@2.10.0 \
+       @jupyterlab/docregistry@4.6.5 @jupyterlab/coreutils@6.6.5 \
+       @jupyterlab/services@7.6.5 @lumino/widgets@2.10.0 \
     && npm cache clean --force
 COPY javascript-lint/package.json javascript-lint/package-lock.json /opt/javascript-lint/
 RUN npm ci --prefix /opt/javascript-lint --ignore-scripts --no-audit --no-fund \
